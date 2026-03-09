@@ -1,0 +1,20 @@
+cat <<EOF > .gitignore
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Rust
+target/
+
+# Go
+generator/src/go-ast-parser/parser
+
+# Data & Secrets
+data/
+certs/
+*.pem
+*.key
+.DS_Store
+EOF
