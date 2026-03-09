@@ -1,9 +1,9 @@
-cat <<EOF > .gitignore
 # Python
 __pycache__/
 *.pyc
 .venv/
 .env
+**/*.egg-info/
 
 # Rust
 target/
@@ -17,4 +17,20 @@ certs/
 *.pem
 *.key
 .DS_Store
-EOF
+
+# IDE & Editor files
+**/.vscode/
+**/.idea/
+
+# Игнорировать все сгенерированные DTO
+client/src/incus/*.rs
+
+# КРОМЕ тех, которые мы закоммитили как минимальный набор
+!client/src/incus/mod.rs
+!client/src/incus/instancespost.rs
+!client/src/incus/instancesource.rs
+!client/src/incus/instancetype.rs
+!client/src/incus/instancestateput.rs
+!client/src/incus/networkspost.rs
+!client/src/incus/configmap.rs
+!client/src/incus/devicesmap.rs

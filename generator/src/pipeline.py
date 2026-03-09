@@ -1,12 +1,20 @@
 import os
 from pathlib import Path
-
 from src.config import Config
-from src.generator.rust_generator import RustGenerator
-from src.generator.type_mapping import is_supported_type
 from src.parser.factory import ParserFactory
+from src.generator.rust_generator import RustGenerator
 from src.validation.validator import RustValidator
 
+# БЕЛЫЙ СПИСОК: генерируем .rs файлы только для этих сущностей
+TARGET_ENTITIES = {
+    "InstancesPost",
+    "InstanceSource",
+    "InstanceType",
+    "InstanceStatePut",
+    "NetworksPost",
+    "ConfigMap",
+    "DevicesMap",
+}
 
 class Pipeline:
     def __init__(self):
@@ -15,58 +23,62 @@ class Pipeline:
         self.validator = RustValidator()
 
     def run(self):
-        # Поддержка ENV для output_dir (чтобы переопределять без правки config.py)
         env_output = os.getenv("OUTPUT_DIR")
         if env_output:
             self.config.output_dir = Path(env_output)
 
         api_path = self.config.incus_repo_path / self.config.api_subdir
-
+        
+        # 1. Парсим ВСЕ структуры из Go
+        # AST-парсер УЖЕ внутри себя делает _resolve_embeddings по полному словарю.
+        # Значит, поля InstancePut уже скопировались внутрь InstancesPost.
         structs, enums, aliases = self.parser.parse_directory(api_path)
 
-        known_types = set(structs.keys()) | set(enums.keys()) | set(aliases.keys())
+        # 2. Оставляем для генерации только то, что в белом списке
+        filtered_structs = {k: v for k, v in structs.items() if k in TARGET_ENTITIES}
+        filtered_enums = {k: v for k, v in enums.items() if k in TARGET_ENTITIES}
+        filtered_aliases = {k: v for k, v in aliases.items() if k in TARGET_ENTITIES}
 
+        # Известные типы собираем из отфильтрованных, чтобы импорты были только на них
+        known_types = set(filtered_structs.keys()) | set(filtered_enums.keys()) | set(filtered_aliases.keys())
+        
         self.generator = RustGenerator(known_types)
 
-        total = len(structs) + len(enums) + len(aliases)
+        total_filtered = len(filtered_structs) + len(filtered_enums) + len(filtered_aliases)
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         generated_files = {}
 
-        # 1. Enums
-        for name, enum in enums.items():
-            rust_code = self.generator.generate_enum(enum)
-            generated_files[f"{name.lower()}.rs"] = rust_code
+        for name, enum in filtered_enums.items():
+            generated_files[f"{name.lower()}.rs"] = self.generator.generate_enum(enum)
 
-        # 2. Aliases
-        for name, alias in aliases.items():
-            rust_code = self.generator.generate_alias(alias)
-            generated_files[f"{name.lower()}.rs"] = rust_code
+        for name, alias in filtered_aliases.items():
+            generated_files[f"{name.lower()}.rs"] = self.generator.generate_alias(alias)
 
-        # 3. Structs
-        for name, struct in structs.items():
-            rust_code = self.generator.generate_struct(struct)
-            generated_files[f"{name.lower()}.rs"] = rust_code
+        for name, struct in filtered_structs.items():
+            generated_files[f"{name.lower()}.rs"] = self.generator.generate_struct(struct)
 
         print("\n──────── Generation Report ────────")
-        print(f"Total entities found: {total}")
-        print(f"Generated files: {len(generated_files)}")
+        print(f"Total entities parsed: {len(structs) + len(enums) + len(aliases)}")
+        print(f"Entities in Whitelist: {total_filtered}")
+        print(f"Structs generated: {len(filtered_structs)}")
+        print(f"Enums generated: {len(filtered_enums)}")
+        print(f"Aliases generated: {len(filtered_aliases)}")
         print(f"Output dir: {self.config.output_dir}")
         print("───────────────────────────────────\n")
 
         print("Validating all generated files...")
         valid = self.validator.validate_all(generated_files)
 
-        # Сохраняем файлы (даже если валидация не прошла, для отладки)
-        print(f"💾 Saving files...")
+        print(f"💾 Saving {len(generated_files)} files to {self.config.output_dir}...")
         for name, content in generated_files.items():
             (self.config.output_dir / name).write_text(content)
 
-        # Генерация mod.rs
-        mod_content = "// Auto-generated. Do not edit.\n\n"
+        # Генерация mod.rs только для сгенерированных файлов
+        mod_content = "// Auto-generated minimal DTOs\n\n"
         for name in sorted(generated_files.keys()):
             mod_name = name.replace(".rs", "")
             mod_content += f"pub mod {mod_name};\n"
-
+        
         (self.config.output_dir / "mod.rs").write_text(mod_content)
         print("📦 Generated mod.rs")
 
