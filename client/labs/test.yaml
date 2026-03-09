@@ -1,0 +1,11 @@
+name: test-lab
+instances:
+  - name: web-server-stopped
+    type: container
+    image: images:alpine/3.20
+    start: false  # Создастся в статусе STOPPED
+
+  - name: web-server-running
+    type: container
+    image: images:alpine/3.20
+    start: true   # Создастся и запустится (RUNNING)
