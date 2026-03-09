@@ -1,2 +1,0 @@
-[console_scripts]
-incus-sync = src.main:main

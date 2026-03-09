@@ -1,8 +1,0 @@
-__init__
-config
-generator
-go-ast-parser
-main
-parser
-pipeline
-validation
