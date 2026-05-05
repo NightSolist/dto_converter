@@ -149,9 +149,11 @@ class Pipeline:
 
             print("📦 Generated mod.rs")
             print("🚀 All done successfully!")
+            return True
         else:
             print("❌ Validation failed! Files were NOT saved.")
             print(f"💡 Причина: {val_result.error_message}")
+            return False
 
     def _build_raw_go_struct(self, struct_obj) -> str:
         lines = [f"type {struct_obj.name} struct {{"]

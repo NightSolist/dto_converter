@@ -37,7 +37,8 @@ def get_github_repo(repo_name: str = INCUS_REPO):
     if not token:
         raise MonitorError("Не задана переменная окружения GITHUB_TOKEN")
 
-    gh = Github(token)
+    from github import Auth
+    gh = Github(auth=Auth.Token(token))
     return gh.get_repo(repo_name)
 
 
