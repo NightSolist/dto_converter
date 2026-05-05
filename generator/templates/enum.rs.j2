@@ -1,0 +1,13 @@
+// Auto-generated. Do not edit.
+
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+{% if repr_type == "i32" %}#[repr(i32)]{% endif %}
+pub enum {{ name }} {
+{% for variant in variants %}
+{% if variant.is_default %}    #[default]{% endif %}
+{% if variant.rename is not none %}    #[serde(rename = "{{ variant.rename }}")]{% endif %}
+    {{ variant.name }}{% if variant.value %} = {{ variant.value }}{% endif %},
+{% endfor %}
+}

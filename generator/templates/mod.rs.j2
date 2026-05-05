@@ -1,0 +1,9 @@
+// Auto-generated minimal DTOs
+
+{% for mod_name in modules %}
+pub mod {{ mod_name }};
+{% endfor %}
+
+{% for entity, mod_name in exports %}
+pub use {{ mod_name }}::{{ entity }};
+{% endfor %}
