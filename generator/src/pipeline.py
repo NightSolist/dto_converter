@@ -19,7 +19,13 @@ TYPES_REQUIRING_LLM = {"ConfigMap", "DevicesMap"}
 # На этапе отладки LLM даём ей только 2 структуры.
 # Остальные сложные структуры временно генерируем шаблоном,
 # чтобы итоговый пакет оставался полным и проходил финальную валидацию.
-LLM_TEST_WHITELIST = {"ProfilePut", "InstancePut"}
+LLM_TEST_WHITELIST = {
+    "ProfilePut",
+    "InstancePut",
+    "ProfilesPost",
+    "InstancesPost",
+    "NetworkPut",
+}
 
 
 def camel_to_snake(name: str) -> str:

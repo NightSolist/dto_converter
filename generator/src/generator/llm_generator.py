@@ -148,6 +148,8 @@ class LLMGenerator:
                 )
                 continue
 
+            rust_code = self._ensure_imports(rust_code)
+
             forbidden_error = self._check_forbidden_local_types(rust_code)
             if forbidden_error:
                 print(f"      ⚠️ [LLM] Ошибка (попытка {attempt}): {forbidden_error}")
@@ -212,6 +214,49 @@ class LLMGenerator:
         if match:
             return match.group(1).strip()
         return None
+
+    def _ensure_imports(self, rust_code: str) -> str:
+        """
+        Автоматически добавляет недостающие импорты для ConfigMap и DevicesMap,
+        если модель использовала тип, но забыла сделать use.
+        """
+        needs_config_map = (
+            "ConfigMap" in rust_code
+            and "use crate::incus::ConfigMap;" not in rust_code
+        )
+        needs_devices_map = (
+            "DevicesMap" in rust_code
+            and "use crate::incus::DevicesMap;" not in rust_code
+        )
+
+        if not needs_config_map and not needs_devices_map:
+            return rust_code
+
+        lines = rust_code.splitlines()
+        import_lines = []
+
+        if needs_config_map:
+            import_lines.append("use crate::incus::ConfigMap;")
+        if needs_devices_map:
+            import_lines.append("use crate::incus::DevicesMap;")
+
+        insert_pos = 0
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+
+            if stripped.startswith("use "):
+                insert_pos = i + 1
+            elif stripped.startswith("#[derive"):
+                if insert_pos == 0:
+                    insert_pos = i
+                break
+
+        for offset, import_line in enumerate(import_lines):
+            if import_line not in lines:
+                lines.insert(insert_pos + offset, import_line)
+
+        return "\n".join(lines)
 
     def _check_forbidden_local_types(self, rust_code: str) -> Optional[str]:
         forbidden_patterns = [
