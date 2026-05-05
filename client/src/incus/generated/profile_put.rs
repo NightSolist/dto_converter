@@ -4,7 +4,7 @@ use crate::incus::DevicesMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProfilePut {
-    config: ConfigMap,
-    description: String,
-    devices: DevicesMap,
+    pub config: ConfigMap,
+    pub description: String,
+    pub devices: DevicesMap,
 }

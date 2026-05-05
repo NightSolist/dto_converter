@@ -1,7 +1,7 @@
 import json
 import os
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 
 from github import Github, GithubException, RateLimitExceededException
@@ -11,9 +11,6 @@ INCUS_REPO = "lxc/incus"
 STATE_FILE = Path(".sync_state")
 CHANGES_FILE = Path("changes.json")
 LOOKBACK_DAYS = 30
-
-API_PATH_PREFIX = "shared/api/"
-CLIENT_PATH_PREFIX = "client/"
 
 
 class MonitorError(Exception):
@@ -29,7 +26,12 @@ def load_state(state_file: Path = STATE_FILE) -> Optional[str]:
 
 
 def save_state(sha: str, state_file: Path = STATE_FILE) -> None:
+    """
+    Сохраняет SHA последнего успешно обработанного коммита.
+    Вызывается только из main.py после успешного завершения pipeline.
+    """
     state_file.write_text(sha, encoding="utf-8")
+    print(f"💾 .sync_state обновлён: {sha}")
 
 
 def get_github_repo(repo_name: str = INCUS_REPO):
@@ -42,7 +44,11 @@ def get_github_repo(repo_name: str = INCUS_REPO):
     return gh.get_repo(repo_name)
 
 
-def get_commits_since(repo, last_sha: Optional[str], lookback_days: int = LOOKBACK_DAYS):
+def get_commits_since(
+    repo,
+    last_sha: Optional[str],
+    lookback_days: int = LOOKBACK_DAYS,
+) -> list:
     """
     Возвращает список коммитов в хронологическом порядке: от старых к новым.
     """
@@ -52,39 +58,77 @@ def get_commits_since(repo, last_sha: Optional[str], lookback_days: int = LOOKBA
         return list(reversed(commits))
 
     commits = []
-    found_last_sha = False
+    found = False
 
     for commit in repo.get_commits():
         if commit.sha == last_sha:
-            found_last_sha = True
+            found = True
             break
         commits.append(commit)
 
-    if not found_last_sha:
+    if not found:
+        print(
+            f"⚠️ SHA {last_sha[:12]} не найден в истории. "
+            f"Используем lookback {lookback_days} дней."
+        )
         since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
         commits = list(repo.get_commits(since=since))
 
     return list(reversed(commits))
 
 
+def is_root_api_go_file(path: str) -> bool:
+    """
+    Проверяет, что файл находится в корне пакета shared/api/.
+    Исключает подпакеты вроде shared/api/scriptlet/*.go,
+    потому что текущий генератор не умеет их обрабатывать.
+    """
+    p = PurePosixPath(path)
+
+    return (
+        len(p.parts) == 3
+        and p.parts[0] == "shared"
+        and p.parts[1] == "api"
+        and p.suffix == ".go"
+        and not p.name.endswith("_test.go")
+    )
+
+
+def is_client_go_file(path: str) -> bool:
+    """
+    Проверяет, что файл относится к клиентской библиотеке.
+    Для client/ оставляем рекурсивный мониторинг всех .go-файлов.
+    """
+    p = PurePosixPath(path)
+
+    return (
+        len(p.parts) >= 2
+        and p.parts[0] == "client"
+        and p.suffix == ".go"
+        and not p.name.endswith("_test.go")
+    )
+
+
 def classify_files(commit_files) -> dict:
+    """
+    Классифицирует изменённые файлы по категориям:
+    - api_files: корневые Go-файлы shared/api/*.go
+    - client_files: Go-файлы client/**/*.go
+    """
     api_files = []
     client_files = []
 
     for file_obj in commit_files:
         path = file_obj.filename
 
-        if path.endswith("_test.go"):
-            continue
-
-        if path.startswith(API_PATH_PREFIX) and path.endswith(".go"):
+        if is_root_api_go_file(path):
             api_files.append(
                 {
                     "path": path,
                     "status": file_obj.status,
                 }
             )
-        elif path.startswith(CLIENT_PATH_PREFIX) and path.endswith(".go"):
+        elif is_client_go_file(path):
             client_files.append(
                 {
                     "path": path,
@@ -98,10 +142,13 @@ def classify_files(commit_files) -> dict:
     }
 
 
-def merge_file_entries(existing: list[dict], new_entries: list[dict]) -> list[dict]:
+def merge_file_entries(
+    existing: list[dict],
+    new_entries: list[dict],
+) -> list[dict]:
     """
-    Объединяет списки файлов по path, чтобы не было дублей.
-    Если файл встречается несколько раз, сохраняется последний status.
+    Объединяет списки файлов по path без дублей.
+    При повторном вхождении сохраняется последний status.
     """
     merged = {item["path"]: dict(item) for item in existing}
 
@@ -132,6 +179,12 @@ def run_monitor(
     output_file: Path = CHANGES_FILE,
     lookback_days: int = LOOKBACK_DAYS,
 ) -> dict:
+    """
+    Проверяет новые коммиты в репозитории Incus.
+
+    Возвращает словарь с результатами.
+    НЕ обновляет .sync_state — это делает main.py после успешного pipeline.
+    """
     try:
         repo = get_github_repo(repo_name)
         last_sha = load_state(state_file)
@@ -146,8 +199,8 @@ def run_monitor(
             print("Изменений не обнаружено.")
             return result
 
-        api_changes = {"files": [], "commits": []}
-        client_changes = {"files": [], "commits": []}
+        api_changes: dict = {"files": [], "commits": []}
+        client_changes: dict = {"files": [], "commits": []}
 
         latest_seen_sha = commits[-1].sha
 
@@ -168,7 +221,10 @@ def run_monitor(
                 )
                 client_changes["commits"].append(commit.sha)
 
-        no_changes = not api_changes["files"] and not client_changes["files"]
+        no_changes = (
+            not api_changes["files"]
+            and not client_changes["files"]
+        )
 
         result = {
             "no_changes": no_changes,
@@ -181,10 +237,6 @@ def run_monitor(
             json.dumps(result, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-
-        # Обновляем состояние даже если изменения нерелевантны,
-        # чтобы не обрабатывать те же коммиты повторно.
-        save_state(latest_seen_sha, state_file)
 
         if no_changes:
             print("Новых релевантных изменений в shared/api/ и client/ нет.")
