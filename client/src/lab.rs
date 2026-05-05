@@ -5,10 +5,7 @@ use crate::client::IncusClient;
 use crate::config::{Lab, InstanceConfig, NetworkConfig};
 use crate::remotes;
 
-use crate::incus::instancespost::InstancesPost;
-use crate::incus::instancesource::InstanceSource;
-use crate::incus::instancetype::InstanceType;
-use crate::incus::networkspost::NetworksPost;
+use crate::incus::{InstanceSource, InstanceType, InstancesPost, NetworksPost};
 
 pub struct Deployer<'a> { client: &'a IncusClient }
 

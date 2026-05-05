@@ -1,9 +1,6 @@
-// Auto-generated minimal DTOs
+pub mod custom;
+pub mod generated;
 
-pub mod configmap;
-pub mod devicesmap;
-pub mod instancesource;
-pub mod instancespost;
-pub mod instancestateput;
-pub mod instancetype;
-pub mod networkspost;
+// Переэкспортируем всё наружу, чтобы клиент мог импортировать типы напрямую
+pub use custom::*;
+pub use generated::*;

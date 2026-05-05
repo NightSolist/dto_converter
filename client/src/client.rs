@@ -4,9 +4,7 @@ use serde_json::Value;
 use std::fs;
 use std::path::Path;
 
-use crate::incus::instancespost::InstancesPost;
-use crate::incus::instancestateput::InstanceStatePut;
-use crate::incus::networkspost::NetworksPost;
+use crate::incus::{InstancesPost, InstanceStatePut, NetworksPost};
 
 pub struct IncusClient {
     http: Client,
