@@ -1,36 +1,29 @@
+cd ~/dto_converter
+
+cat > .gitignore << 'EOF'
 # Python
 __pycache__/
 *.pyc
+*.pyo
 .venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment
 .env
-**/*.egg-info/
 
-# Rust
-target/
-
-# Go
-generator/src/go-ast-parser/parser
-
-# Data & Secrets
-data/
-certs/
-*.pem
-*.key
+# IDE
+.vscode/
+.idea/
 .DS_Store
 
-# IDE & Editor files
-**/.vscode/
-**/.idea/
+# Go binary (rebuild via 'make build')
+src/go-ast-parser/parser
 
-# Игнорировать все сгенерированные DTO
-client/src/incus/*.rs
-
-# КРОМЕ тех, которые мы закоммитили как минимальный набор
-!client/src/incus/mod.rs
-!client/src/incus/instancespost.rs
-!client/src/incus/instancesource.rs
-!client/src/incus/instancetype.rs
-!client/src/incus/instancestateput.rs
-!client/src/incus/networkspost.rs
-!client/src/incus/configmap.rs
-!client/src/incus/devicesmap.rs
+# Runtime state
+state/.sync_state
+state/changes.json
+EOF

@@ -18,13 +18,13 @@ build:
 # Запуск пайплайна генерации
 run:
 	@echo "==> Running Incus Model Sync Pipeline..."
-	.venv/bin/python -m src.main
+	.venv/bin/python main.py
 
 # Очистка мусора
 clean:
 	@echo "==> Cleaning up..."
 	rm -rf .venv
-	rm -rf src/incus_model_sync.egg-info
+	rm -rf src/*.egg-info
 	rm -f src/go-ast-parser/parser
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	@echo "==> Cleaned."
