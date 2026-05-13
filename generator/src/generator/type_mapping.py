@@ -15,6 +15,12 @@ TYPE_MAP = {
     "any": "serde_json::Value",
 }
 
+# Специальные map-типы — проверяются ДО общего парсинга map[]
+SPECIAL_MAP_TYPES = {
+    "map[string]string": "ConfigMap",
+    "map[string]map[string]string": "DevicesMap",
+}
+
 PRIMITIVES = set(TYPE_MAP.keys())
 
 
@@ -24,7 +30,11 @@ def is_supported_type(go_type: str) -> bool:
 
 def map_go_type(go_type: str) -> str:
     t = go_type.strip()
-    
+
+    # Специальные map-типы — проверяем первыми
+    if t in SPECIAL_MAP_TYPES:
+        return SPECIAL_MAP_TYPES[t]
+
     if t.startswith("[]"):
         inner = map_go_type(t[2:])
         return f"Vec<{inner}>"
@@ -34,8 +44,6 @@ def map_go_type(go_type: str) -> str:
         return f"Option<{inner}>"
 
     if t.startswith("map["):
-        # Парсим ключ и значение мапы с учетом вложенности.
-        # Например: map[string]map[string]string
         bracket_level = 0
         for i, char in enumerate(t):
             if char == '[':
@@ -43,16 +51,14 @@ def map_go_type(go_type: str) -> str:
             elif char == ']':
                 bracket_level -= 1
 
-            # Когда мы нашли закрывающую скобку для ключа (и мы не внутри вложенных скобок)
             if bracket_level == 0 and i > 3:
-                key_type = t[4:i]        # Извлекаем то, что между map[ и ]
-                value_type = t[i+1:]     # Извлекаем остаток строки (значение)
+                key_type = t[4:i]
+                value_type = t[i+1:]
 
                 rust_key = map_go_type(key_type)
                 rust_value = map_go_type(value_type)
                 return f"HashMap<{rust_key}, {rust_value}>"
 
-        # На случай, если парсинг ключа сломался
         return "HashMap<String, String>"
 
     return TYPE_MAP.get(t, t)

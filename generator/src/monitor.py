@@ -7,7 +7,7 @@ from typing import Optional
 from github import Github, GithubException, RateLimitExceededException
 
 
-INCUS_REPO = "lxc/incus"
+INCUS_REPO = os.getenv("INCUS_SOURCE_REPO", "lxc/incus")
 STATE_FILE = Path(".sync_state")
 CHANGES_FILE = Path("changes.json")
 LOOKBACK_DAYS = 30

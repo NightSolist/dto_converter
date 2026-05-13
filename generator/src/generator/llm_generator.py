@@ -11,40 +11,51 @@ CODE_FENCE = "```"
 SYSTEM_PROMPT = f"""
 Ты — ИИ-ассистент, который преобразует структуры Go в идиоматичный Rust с поддержкой serde.
 
-Правила трансформации:
-- string -> String
-- int -> i64
-- bool -> bool
-- []T -> Vec<T>
-- map[string]string -> ConfigMap
-- map[string]map[string]string -> DevicesMap
-- time.Time -> chrono::DateTime<chrono::Utc>
-- interface{{}} / any -> serde_json::Value
+Правила трансформации типов (СТРОГО СОБЛЮДАЙ):
+- string → String
+- int → i64  (НИКОГДА не используй i32 для Go int)
+- int64 → i64
+- int32 → i32
+- uint → u64
+- uint64 → u64
+- uint32 → u32
+- float64 → f64
+- bool → bool
+- []T → Vec<T>
+- map[string]string → ConfigMap
+- map[string]map[string]string → DevicesMap
+- time.Time → chrono::DateTime<chrono::Utc>
+- interface{{}} / any → serde_json::Value
 
 Правила генерации:
 1. Всегда добавляй:
    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 
-2. Всегда подключай serde:
+2. ВСЕ поля структуры ОБЯЗАТЕЛЬНО объявляй с модификатором pub:
+   pub config: ConfigMap,
+   pub description: String,
+   НИКОГДА не пиши поля без pub.
+
+3. Всегда подключай serde:
    use serde::{{Serialize, Deserialize}};
 
-3. Если используется ConfigMap, добавь:
+4. Если используется ConfigMap, добавь:
    use crate::incus::ConfigMap;
 
-4. Если используется DevicesMap, добавь:
+5. Если используется DevicesMap, добавь:
    use crate::incus::DevicesMap;
 
-5. Если поле имеет тег json:"name", используй:
+6. Если поле имеет тег json:"name", используй:
    #[serde(rename = "name")]
 
-6. Если поле имеет omitempty:
+7. Если поле имеет omitempty:
    - оберни тип в Option<T>
    - добавь #[serde(skip_serializing_if = "Option::is_none")]
 
-7. Если структура встроенная через yaml:",inline":
+8. Если структура встроенная через yaml:",inline":
    используй #[serde(flatten)]
 
-8. Если имя поля является ключевым словом Rust (например type),
+9. Если имя поля является ключевым словом Rust (например type),
    используй r#type.
 
 ВАЖНО:
@@ -148,7 +159,10 @@ class LLMGenerator:
                 )
                 continue
 
+            rust_code = self._split_use_statements(rust_code)
             rust_code = self._ensure_imports(rust_code)
+            rust_code = self._fix_int_types(rust_code, raw_go_code)
+            rust_code = self._ensure_pub_fields(rust_code)
 
             forbidden_error = self._check_forbidden_local_types(rust_code)
             if forbidden_error:
@@ -215,10 +229,29 @@ class LLMGenerator:
             return match.group(1).strip()
         return None
 
+    def _split_use_statements(self, rust_code: str) -> str:
+        """
+        Разбивает слипшиеся use-statements на отдельные строки.
+        Например: 'use a;use b;' -> 'use a;\\nuse b;'
+        """
+        lines = rust_code.splitlines()
+        result = []
+        for line in lines:
+            if line.count("use ") > 1:
+                parts = [p.strip() for p in line.split(";") if p.strip()]
+                for part in parts:
+                    if not part.endswith(";"):
+                        part = part + ";"
+                    result.append(part)
+            else:
+                result.append(line)
+        return "\n".join(result)
+
     def _ensure_imports(self, rust_code: str) -> str:
         """
         Автоматически добавляет недостающие импорты для ConfigMap и DevicesMap,
         если модель использовала тип, но забыла сделать use.
+        Проверяет наличие импорта по содержимому кода, а не по точному совпадению строки.
         """
         needs_config_map = (
             "ConfigMap" in rust_code
@@ -232,19 +265,17 @@ class LLMGenerator:
         if not needs_config_map and not needs_devices_map:
             return rust_code
 
-        lines = rust_code.splitlines()
         import_lines = []
-
         if needs_config_map:
             import_lines.append("use crate::incus::ConfigMap;")
         if needs_devices_map:
             import_lines.append("use crate::incus::DevicesMap;")
 
+        lines = rust_code.splitlines()
         insert_pos = 0
 
         for i, line in enumerate(lines):
             stripped = line.strip()
-
             if stripped.startswith("use "):
                 insert_pos = i + 1
             elif stripped.startswith("#[derive"):
@@ -253,10 +284,85 @@ class LLMGenerator:
                 break
 
         for offset, import_line in enumerate(import_lines):
-            if import_line not in lines:
-                lines.insert(insert_pos + offset, import_line)
+            lines.insert(insert_pos + offset, import_line)
 
         return "\n".join(lines)
+    
+    def _ensure_pub_fields(self, rust_code: str) -> str:
+        """
+        Гарантирует, что все поля внутри pub struct имеют модификатор pub.
+        LLM иногда забывает добавить pub для простых структур.
+        """
+        lines = rust_code.splitlines()
+        result = []
+        inside_struct = False
+        brace_depth = 0
+
+        for line in lines:
+            stripped = line.strip()
+
+            # Детектируем начало pub struct
+            if re.match(r'^\s*pub\s+struct\s+\w+', line):
+                inside_struct = True
+                result.append(line)
+                if '{' in line:
+                    brace_depth += line.count('{') - line.count('}')
+                continue
+
+            if inside_struct:
+                brace_depth += line.count('{') - line.count('}')
+
+                # Поле выглядит как `name: Type,` — добавим pub
+                # Не трогаем строки с #[...] и закрывающую }
+                is_attr = stripped.startswith('#[')
+                is_close = stripped.startswith('}')
+                is_blank = not stripped
+                already_pub = stripped.startswith('pub ')
+                looks_like_field = bool(re.match(r'^[a-zA-Z_][\w#]*\s*:', stripped))
+
+                if (
+                    not is_attr
+                    and not is_close
+                    and not is_blank
+                    and not already_pub
+                    and looks_like_field
+                ):
+                    # Сохраняем отступ
+                    indent = line[:len(line) - len(line.lstrip())]
+                    line = f"{indent}pub {stripped}"
+
+                if brace_depth <= 0:
+                    inside_struct = False
+
+            result.append(line)
+
+        return "\n".join(result)
+
+    def _fix_int_types(self, rust_code: str, raw_go_code: str) -> str:
+        """
+        Исправляет i32 -> i64 для полей, которые в Go объявлены
+        как int (не int32, не int64).
+        """
+        go_int_fields = set(re.findall(
+            r'\b(\w+)\s+int\b(?!\d)',
+            raw_go_code
+        ))
+
+        if not go_int_fields:
+            return rust_code
+
+        lines = rust_code.splitlines()
+        result = []
+
+        for line in lines:
+            for field in go_int_fields:
+                snake_field = self._camel_to_snake(field)
+                if snake_field in line.lower() and 'i32' in line:
+                    line = line.replace('i32', 'i64')
+                    break
+            result.append(line)
+
+        return "\n".join(result)
 
     def _check_forbidden_local_types(self, rust_code: str) -> Optional[str]:
         forbidden_patterns = [

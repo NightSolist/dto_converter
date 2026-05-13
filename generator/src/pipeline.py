@@ -21,64 +21,83 @@ MANUAL_TYPES = {"ConfigMap", "DevicesMap"}
 # Если структура содержит такие типы, она попадает в категорию "сложных"
 TYPES_REQUIRING_LLM = {"ConfigMap", "DevicesMap"}
 
-# Белый список структур, входящих в текущий прототип.
-# StoragePoolState временно исключён, так как тянет внешнюю зависимость
-# ResourcesStoragePoolSpace и ломает "простой" subset прототипа.
+# ============================================================
+# PROTOTYPE STRUCT WHITELIST
+# ============================================================
+# Вариант 1:
+# минимальный deployment subset с уже настроенным доступом к Incus.
+#
+# Цель:
+# - создать сеть
+# - создать профиль
+# - создать storage pool
+# - создать экземпляры (VM / container)
+# - управлять состоянием экземпляров
+# - отслеживать асинхронные операции
+#
+# Не включает:
+# - Certificate*
+# - Project*
+# - Cluster*
+# - Image*
+# - Instance / InstanceFull / InstancePost
+# - InstanceSnapshot
+# ============================================================
 PROTOTYPE_STRUCT_WHITELIST = {
-    # certificate.go
-    "Certificate",
-    "CertificatePut",
-    "CertificatesPost",
-    "CertificateAddToken",
+    # network.go
+    "Network",
+    "NetworkPut",
+    "NetworksPost",
 
     # profile.go
     "Profile",
     "ProfilePut",
     "ProfilesPost",
 
-    # project.go
-    "Project",
-    "ProjectPut",
-    "ProjectsPost",
-
     # storage_pool.go
     "StoragePool",
     "StoragePoolPut",
     "StoragePoolsPost",
 
-    # network.go
-    "Network",
-    "NetworkPut",
-    "NetworksPost",
+    # instance.go
+    "InstancePut",
 
-    # cluster.go
-    "ClusterMember",
-    "ClusterMemberPut",
+    # instances_post.go
+    "InstancesPost",
 
-    # operation.go
-    "Operation",
+    # instance_source.go
+    "InstanceSource",
 
     # instance_state.go
     "InstanceStatePut",
 
-    # instance.go (только разрешённая часть текущего этапа)
-    "InstancePut",
+    # operation.go
+    "Operation",
 }
 
-# Явно разрешённые enum-типы прототипа.
-# Если InstanceType в конкретной версии API окажется enum, он останется в прототипе.
+# ============================================================
+# PROTOTYPE ENUM / ALIAS WHITELIST
+# ============================================================
+# StatusCode нужен для Operation.
+# InstanceType нужен для InstancesPost.
+# InstanceType может быть либо enum, либо alias — поэтому
+# он указан в обоих whitelist.
+# ============================================================
 PROTOTYPE_ENUM_WHITELIST = {
     "InstanceType",
+    "StatusCode",
 }
 
-# Явно разрешённые alias-типы прототипа.
-# Если InstanceType в конкретной версии API окажется alias, он останется в прототипе.
 PROTOTYPE_ALIAS_WHITELIST = {
     "InstanceType",
 }
 
-# Текущий подтверждённый стабильный whitelist для LLM.
-# Все 5 структур уже проходили через LLM с первой попытки.
+# ============================================================
+# LLM TEST WHITELIST
+# ============================================================
+# Оставляем только уже подтвержденный стабильный набор.
+# Всё остальное внутри prototype subset пока идет шаблонно.
+# ============================================================
 LLM_TEST_WHITELIST = {
     "ProfilePut",
     "ProfilesPost",
@@ -177,9 +196,6 @@ class Pipeline:
             for name, struct_obj in dispatch_res.llm_structs.items():
                 mod_name = camel_to_snake(name)
 
-                # В текущем этапе LLM запускается только на стабильном whitelist.
-                # Остальные сложные структуры временно генерируем шаблоном,
-                # чтобы не ломать общий пакет.
                 if name not in LLM_TEST_WHITELIST:
                     print(f"⏭️  {name}: fallback -> template")
                     generated_files[f"{mod_name}.rs"] = self.generator.generate_struct(struct_obj)
@@ -193,7 +209,7 @@ class Pipeline:
                 success, rust_code, info = llm_generator.generate(
                     go_struct=struct_obj,
                     validator=self.validator,
-                    test_env_files={},  # пока изолированная валидация
+                    test_env_files={},
                     raw_go_code=raw_go_code,
                 )
 
@@ -258,10 +274,6 @@ class Pipeline:
             return False
 
     def _filter_structs_for_prototype(self, structs: dict[str, object]) -> dict[str, object]:
-        """
-        Оставляет только структуры, входящие в текущий scope прототипа.
-        Если whitelist будет пустым, фильтрация отключается.
-        """
         if not PROTOTYPE_STRUCT_WHITELIST:
             return structs
 
@@ -277,18 +289,11 @@ class Pipeline:
         aliases: dict[str, object],
         structs: dict[str, object],
     ) -> tuple[dict[str, object], dict[str, object]]:
-        """
-        Для прототипа оставляем только те enums/aliases, которые:
-        1) явно разрешены whitelist'ом,
-        2) напрямую используются выбранными struct'ами,
-        3) либо нужны как зависимости уже выбранных alias'ов.
-        """
         direct_refs = self._collect_referenced_type_names_from_structs(structs)
 
         kept_enums = set(PROTOTYPE_ENUM_WHITELIST) | (set(enums.keys()) & direct_refs)
         kept_aliases = set(PROTOTYPE_ALIAS_WHITELIST) | (set(aliases.keys()) & direct_refs)
 
-        # Рекурсивно подтягиваем зависимости alias -> alias / enum
         changed = True
         while changed:
             changed = False
@@ -331,14 +336,6 @@ class Pipeline:
         return refs
 
     def _extract_type_tokens(self, go_type: str) -> set[str]:
-        """
-        Грубое извлечение имён кастомных типов из Go-строки типа.
-        Подходит для текущего этапа прототипа.
-        Примеры:
-        - InstanceType
-        - []AccessEntry
-        - map[string]MetadataConfigGroup
-        """
         return set(re.findall(r"\b[A-Z][A-Za-z0-9_]*\b", go_type))
 
     def _build_raw_go_struct(self, struct_obj) -> str:
