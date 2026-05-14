@@ -8,8 +8,8 @@ from github import Github, GithubException, RateLimitExceededException
 
 
 INCUS_REPO = os.getenv("INCUS_SOURCE_REPO", "lxc/incus")
-STATE_FILE = Path(".sync_state")
-CHANGES_FILE = Path("changes.json")
+STATE_FILE = Path("state/.sync_state")
+CHANGES_FILE = Path("state/changes.json")
 LOOKBACK_DAYS = 30
 
 
@@ -30,6 +30,9 @@ def save_state(sha: str, state_file: Path = STATE_FILE) -> None:
     Сохраняет SHA последнего успешно обработанного коммита.
     Вызывается только из main.py после успешного завершения pipeline.
     """
+    # Гарантируем, что папка state/ существует
+    state_file.parent.mkdir(parents=True, exist_ok=True) 
+    
     state_file.write_text(sha, encoding="utf-8")
     print(f"💾 .sync_state обновлён: {sha}")
 
@@ -232,7 +235,7 @@ def run_monitor(
             "api_changes": api_changes,
             "client_changes": client_changes,
         }
-
+        output_file.parent.mkdir(parents=True, exist_ok=True)
         output_file.write_text(
             json.dumps(result, indent=2, ensure_ascii=False),
             encoding="utf-8",
