@@ -2,7 +2,8 @@
 
 Автоматическая синхронизация моделей данных между Go-репозиторием [Incus](https://github.com/lxc/incus) и Rust-приложениями на основе гибридной генерации с локальными LLM.
 
-Проект является частью ВКР по теме *"Автоматическая синхронизация моделей данных клиентской библиотеки Incus и Rust-приложений на основе гибридной генерации с локальными LLM"* (НИЯУ МИФИ, 10.04.01 «Информационная безопасность»).
+Проект является частью ВКР по теме *«Автоматическая синхронизация моделей данных клиентской библиотеки Incus и Rust-приложений на основе гибридной генерации с локальными LLM»*  
+(НИЯУ МИФИ, 10.04.01 «Информационная безопасность»).
 
 ---
 
@@ -10,73 +11,93 @@
 
 При обнаружении изменений в Go-структурах исходного репозитория Incus система автоматически:
 
-1. Парсит изменённые Go-структуры через `go/ast`
-2. Генерирует Rust DTO гибридным способом (шаблон + локальная LLM)
-3. Валидирует результат через `cargo check`
-4. Создаёт Pull Request в целевой Rust-репозиторий
-5. Запускает self-hosted CI/CD pipeline (Woodpecker)
-6. Отправляет email-уведомление инженеру
+1. Мониторит новые коммиты в Go-репозитории через GitHub API
+2. Парсит Go-структуры через `go/ast`
+3. Генерирует Rust DTO гибридным способом:
+   - шаблонная генерация (`Jinja2`)
+   - локальная LLM (`Ollama`, `qwen2.5-coder:1.5b`)
+4. Валидирует результат через `cargo check`
+5. Создаёт Pull Request в целевой Rust-репозиторий
+6. Запускает self-hosted CI/CD pipeline (`Woodpecker`)
+7. Отправляет email-уведомление инженеру
 
-**Главный tagline:** *"Изменение в Go → автоматический Pull Request в Rust → уведомление инженеру"*
+**Главный tagline:**  
+**«Изменение в Go → автоматический Pull Request в Rust → уведомление инженеру»**
+
+---
+
+## Ключевые свойства
+
+- **Нет промежуточных схем** — работа напрямую с Go-исходниками
+- **Гибридная генерация** — шаблонный путь + локальная LLM
+- **Конфиденциальность** — код не покидает локальный контур
+- **Compile-time validation** — результат проверяется компилятором Rust
+- **Self-hosted CI/CD** — локальный Woodpecker без внешних webhook
+- **Минимум ручного труда** — от изменения в Go до PR и уведомления
 
 ---
 
 ## Архитектура
 
+```text
+main.py
+  └── run_monitor()                 # Мониторинг изменений в Go-репозитории
+        └── если есть изменения:
+  └── Pipeline().run()              # Конвейер генерации
+        ├── ASTParser               # Парсинг Go-структур через AST
+        ├── Dispatcher              # Классификация: template / llm / manual
+        ├── RustGenerator           # Шаблонная генерация (Jinja2)
+        ├── LLMGenerator            # LLM-генерация (Ollama / Qwen2.5-Coder)
+        └── RustValidator           # Валидация через cargo check
+  └── GitHubPublisher.publish()     # Создание Pull Request
+  └── WoodpeckerTrigger             # Запуск CI/CD pipeline
+  └── save_state()                  # Обновление state/.sync_state
 ```
-┌─────────────────────────┐
-│  Go repo (Incus fork)   │
-│  shared/api/*.go        │
-└───────────┬─────────────┘
-            │ git push
-            ▼
-┌─────────────────────────┐
-│  monitor.py             │  ← GitHub API
-│  (find new commits)     │
-└───────────┬─────────────┘
-            │
-            ▼
-┌─────────────────────────┐
-│  Pipeline               │
-│  ├── Go AST parser      │  ← src/go-ast-parser/parser (Go binary)
-│  ├── Dispatcher         │  ← template / LLM / manual
-│  ├── Rust generator     │  ← Jinja2 templates
-│  ├── LLM generator      │  ← Ollama (qwen2.5-coder:1.5b)
-│  └── Rust validator     │  ← cargo check (temp project)
-└───────────┬─────────────┘
-            │
-            ▼
-┌─────────────────────────┐
-│  GitHub Publisher       │  ← Git Tree API
-│  (create PR)            │
-└───────────┬─────────────┘
-            │
-            ▼
-┌─────────────────────────┐
-│  Woodpecker CI          │
-│  ├── cargo check        │
-│  ├── cargo fmt          │
-│  ├── cargo test (unit)  │
-│  └── email notification │
-└─────────────────────────┘
+
+### Поток данных
+
+```text
+Go repo (shared/api/*.go)
+    ↓
+monitor.py (GitHub API)
+    ↓
+Go AST parser
+    ↓
+Dispatcher
+    ├── простые структуры → RustGenerator (Jinja2)
+    └── сложные структуры → LLMGenerator (Ollama)
+           └── при ошибке → fallback на шаблон
+    ↓
+RustValidator (cargo check во временном проекте)
+    ↓
+Локальная запись в:
+~/incus-lab-manager/src/incus/generated_prototype
+    ↓
+GitHubPublisher (Git Tree API)
+    ↓
+Pull Request
+    ↓
+WoodpeckerTrigger (REST API)
+    ↓
+Woodpecker CI: cargo check → cargo fmt → email
 ```
 
 ---
 
 ## Структура проекта
 
-```
+```text
 ~/dto_converter/                       ← Этот репозиторий (generator)
 ├── main.py                            ← Точка входа
-├── Makefile                           ← Все команды
-├── pyproject.toml                     ← Python зависимости
+├── Makefile                           ← Основные команды
+├── pyproject.toml                     ← Python-зависимости и конфигурация проекта
 ├── README.md
 ├── .env                               ← Секреты (не в Git)
 ├── .gitignore
-├── state/                             ← Runtime state (не в Git)
+├── state/                             ← Runtime-state
 │   ├── .sync_state
 │   └── changes.json
-├── templates/                         ← Jinja2 шаблоны
+├── templates/                         ← Jinja2-шаблоны
 │   ├── struct.rs.j2
 │   ├── enum.rs.j2
 │   └── mod.rs.j2
@@ -87,11 +108,13 @@
     ├── dispatcher.py                  ← template / llm / manual
     ├── github_publisher.py            ← Создание PR
     ├── woodpecker_trigger.py          ← Триггер CI
-    ├── email_notifier.py              ← Email (резервный канал)
+    ├── email_notifier.py              ← Резервный email-модуль
     ├── parser/
     │   ├── ast_parser.py              ← Обёртка над Go AST
     │   ├── factory.py
-    │   └── go_types.py
+    │   ├── go_types.py
+    │   ├── base.py
+    │   └── regex_parser.py
     ├── generator/
     │   ├── rust_generator.py          ← Шаблонная генерация
     │   ├── llm_generator.py           ← LLM-генерация
@@ -99,17 +122,18 @@
     ├── validation/
     │   └── validator.py               ← cargo check
     └── go-ast-parser/
-        ├── main.go                    ← Go-парсер исходников
+        ├── main.go                    ← Go AST parser
+        ├── go.mod
         └── parser                     ← Скомпилированный бинарник
 ```
 
-**Связанные репозитории:**
+### Связанные репозитории
 
-```
+```text
 ~/incus-lab-manager/                   ← Целевой Rust-репозиторий
 ├── src/incus/
 │   ├── custom/                        ← Ручные типы (ConfigMap, DevicesMap)
-│   └── generated_prototype/           ← ← ← Генератор пишет сюда
+│   └── generated_prototype/           ← Генератор пишет сюда
 ├── tests/
 │   ├── serde_dto.rs                   ← Unit-тесты сериализации
 │   └── integration_lab.rs             ← Integration с реальным Incus
@@ -124,6 +148,7 @@
 ## Требования
 
 ### Системные
+
 - **OS:** Linux (Ubuntu/Debian)
 - **Python:** 3.11+
 - **Rust:** 1.83+
@@ -131,9 +156,15 @@
 - **Incus:** 6.x (для integration-тестов)
 
 ### Внешние сервисы
+
 - **Ollama** с моделью `qwen2.5-coder:1.5b` (локально)
 - **Woodpecker CI** v3.x (Docker, локально)
 - **GitHub** аккаунт + Personal Access Token
+
+### Важно
+
+Проект **не использует `requirements.txt`**.  
+Python-зависимости управляются через `pyproject.toml`.
 
 ---
 
@@ -145,10 +176,10 @@
 # Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Go (если нет)
+# Go
 sudo apt install -y golang-go
 
-# Incus (для integration-тестов)
+# Incus
 # См. https://linuxcontainers.org/incus/docs/main/installing/
 
 # Ollama
@@ -180,7 +211,7 @@ cd ~/dto_converter
 # Установить Python-зависимости и собрать Go-парсер
 make install
 
-# Создать .env с секретами
+# Создать .env
 cat > .env << 'ENV_EOF'
 INCUS_REPO_PATH=/home/dev/data/incus-fork-demo
 INCUS_SOURCE_REPO=NightSolist/incus-fork-demo
@@ -192,7 +223,6 @@ WOODPECKER_TOKEN=your_woodpecker_token
 WOODPECKER_REPO=NightSolist/incus-lab-manager
 ENV_EOF
 
-# Защитить файл
 chmod 600 .env
 ```
 
@@ -222,39 +252,50 @@ cd ~/dto_converter
 make status
 ```
 
-Должно показать ✅ для всех компонентов.
+Должно показать, что доступны:
+- Incus
+- Ollama
+- Woodpecker
+- Rust client
+- generator state
+
+---
+
+## Основные команды
+
+```bash
+make help              # Список всех команд
+make run               # Полный цикл: monitor → generate → PR → CI
+make test              # Все 4 уровня тестирования
+make status            # Статус компонентов
+make install           # Установка Python env + сборка Go parser
+make build             # Только пересборка Go parser
+```
 
 ---
 
 ## Использование
 
-### Основные команды
-
-```bash
-make help              # Список всех команд
-make run               # Запустить полный цикл (monitor → generate → PR → CI)
-make test              # Прогнать все тесты
-make status            # Показать статус компонентов
-```
-
-### Запуск синхронизации
+### Запуск полного цикла
 
 ```bash
 make run
 ```
 
 Что произойдёт:
-1. Запросит GitHub API на наличие новых коммитов в Go-репозитории
-2. Если изменений нет — выйдет
-3. Если есть — запустит pipeline генерации
-4. Создаст PR в `incus-lab-manager`
-5. Триггернёт Woodpecker pipeline
-6. Email придёт после завершения CI
 
-**Если хочешь форсировать прогон без реальных изменений:**
+1. Запрос к GitHub API на наличие новых коммитов
+2. Если изменений нет — ранний выход
+3. Если есть — запуск pipeline генерации
+4. Создание PR в `incus-lab-manager`
+5. Триггер Woodpecker pipeline
+6. Email после завершения CI
+
+### Принудительный повторный прогон
+
 ```bash
-make state-reset    # Сбросить .sync_state
-make run            # Pipeline увидит коммиты за 30 дней
+make state-reset
+make run
 ```
 
 ---
@@ -264,45 +305,46 @@ make run            # Pipeline увидит коммиты за 30 дней
 Прототип имеет **4 уровня тестирования**:
 
 ```bash
-make test                    # Все 4 уровня сразу
+make test
 ```
 
 Или по отдельности:
 
 ```bash
-make test-pipeline           # 1. Только генератор (без GitHub)
-make test-rust-unit          # 2. Rust unit-тесты сериализации DTO
-make test-rust-integration   # 3. Rust integration с реальным Incus
-make test-yaml               # 4. YAML deploy + destroy цикл
+make test-pipeline
+make test-rust-unit
+make test-rust-integration
+make test-yaml
 ```
 
-### Уровень 1: Pipeline (без сети)
+### Уровень 1 — Pipeline (без GitHub)
 
-Парсинг Go → генерация → валидация. Не требует GitHub API.
+Парсинг Go → генерация → валидация.  
+Не требует GitHub API, PR и Woodpecker.
 
 ```bash
 make test-pipeline
 ```
 
-### Уровень 2: Unit-тесты Rust (без Incus)
+### Уровень 2 — Rust unit-тесты
 
-Проверяет сериализацию/десериализацию DTO в JSON.
+Проверяет сериализацию и DTO-контракты.
 
 ```bash
 make test-rust-unit
 ```
 
-### Уровень 3: Integration с реальным Incus
+### Уровень 3 — Integration с реальным Incus
 
-Создаёт storage pool, сеть, профиль и инстанс на реальном Incus, проверяет, что DTO работают, и удаляет всё.
+Создаёт storage pool, сеть, профиль и инстанс на реальном Incus, затем удаляет их.
 
 ```bash
 make test-rust-integration
 ```
 
-### Уровень 4: YAML deploy цикл
+### Уровень 4 — YAML deploy / destroy
 
-Разворачивает полную лабораторию из `demo-lab.yaml` (storage pool + сеть + профиль + 2 контейнера) и сносит её.
+Разворачивает лабораторию из `demo-lab.yaml`, затем полностью удаляет её.
 
 ```bash
 make test-yaml
@@ -313,21 +355,21 @@ make test-yaml
 ## Очистка
 
 ```bash
-make state-reset      # Сбросить только .sync_state (для повторного прогона)
-make reset-incus      # Удалить все Incus-ресурсы demo-* и t<число>-*
+make state-reset      # Сбросить только state генератора
+make reset-incus      # Удалить ресурсы Incus demo-* и t<число>-*
 make reset            # state-reset + reset-incus + cargo clean
 make full-reset       # reset + удалить .venv, parser, __pycache__
-make clean            # Только build artifacts (без Incus)
+make clean            # Только build artifacts
 ```
 
 ### Когда что использовать
 
 | Сценарий | Команда |
 |---|---|
-| Хочу прогнать `make run` ещё раз | `make state-reset` |
-| Тест упал, остались висящие ресурсы в Incus | `make reset-incus` |
+| Хочу заново запустить `make run` | `make state-reset` |
+| После тестов остались ресурсы в Incus | `make reset-incus` |
 | Хочу всё пересобрать с нуля | `make full-reset && make install` |
-| Просто почистить мусор | `make clean` |
+| Просто почистить build-артефакты | `make clean` |
 
 ---
 
@@ -337,22 +379,26 @@ make clean            # Только build artifacts (без Incus)
 
 | Переменная | Описание | Пример |
 |---|---|---|
-| `INCUS_REPO_PATH` | Путь к локальному клону Go-репо | `/home/dev/data/incus-fork-demo` |
+| `INCUS_REPO_PATH` | Путь к локальному клону Go-репозитория | `/home/dev/data/incus-fork-demo` |
 | `INCUS_SOURCE_REPO` | GitHub-имя Go-репозитория | `NightSolist/incus-fork-demo` |
-| `GITHUB_TOKEN` | Personal Access Token GitHub | `ghp_...` |
+| `GITHUB_TOKEN` | GitHub Personal Access Token | `ghp_...` |
 | `WOODPECKER_URL` | URL Woodpecker UI | `http://localhost:8000` |
 | `WOODPECKER_TOKEN` | API-токен Woodpecker | `wp_...` |
 | `WOODPECKER_REPO` | Целевой репозиторий в Woodpecker | `NightSolist/incus-lab-manager` |
 
-### Prototype mode
+---
+
+## Prototype mode
 
 В `src/pipeline.py` включён `PROTOTYPE_MODE = True`. Это означает:
-- Обрабатывается только whitelist из 14 структур (не все 221)
-- Файлы пишутся в `~/incus-lab-manager/src/incus/generated_prototype/`
-- LLM используется только для подмножества из 5 структур (`LLM_TEST_WHITELIST`)
 
-Whitelist структур:
-```
+- обрабатывается только whitelist из 14 структур;
+- генерация пишется в `~/incus-lab-manager/src/incus/generated_prototype/`;
+- LLM используется только для стабильного подмножества структур.
+
+### Prototype whitelist
+
+```text
 Network, NetworkPut, NetworksPost,
 Profile, ProfilePut, ProfilesPost,
 StoragePool, StoragePoolPut, StoragePoolsPost,
@@ -361,31 +407,154 @@ InstanceSource, InstanceStatePut,
 Operation
 ```
 
+### LLM whitelist
+
+```text
+ProfilePut
+ProfilesPost
+InstancePut
+NetworkPut
+StoragePoolPut
+```
+
+### Manual types
+
+Следующие типы написаны вручную в Rust-репозитории и не перезаписываются:
+
+- `ConfigMap`
+- `DevicesMap`
+
 ---
 
 ## Гибридная генерация
 
 ### Шаблонный путь (Jinja2)
-- Для простых структур с примитивными типами
-- 100% детерминированный
-- Использует `templates/struct.rs.j2`, `enum.rs.j2`, `mod.rs.j2`
+
+- для простых структур с примитивными типами;
+- полностью детерминированный;
+- использует:
+  - `templates/struct.rs.j2`
+  - `templates/enum.rs.j2`
+  - `templates/mod.rs.j2`
 
 ### LLM-путь (Ollama + Qwen2.5-Coder)
-- Для сложных структур с `ConfigMap` / `DevicesMap`
-- Локальная модель → код не уходит в облако
-- Постобработка:
-  - Разбивка слипшихся `use` 
-  - Добавление недостающих импортов
-  - Замена `i32` → `i64` для Go `int`
-  - Добавление `pub` к полям
-  - Запрет переопределения `ConfigMap`/`DevicesMap`
-- Fallback на шаблон при ошибке LLM
-- Early-stop при повторяющейся ошибке
-- Максимум 3 попытки
 
-### Manual типы
-- `ConfigMap` и `DevicesMap` написаны вручную в Rust-репо
-- Не перезаписываются генератором
+- для сложных структур с `ConfigMap` / `DevicesMap`;
+- локальная модель, код не уходит в облако;
+- включает постобработку:
+  - разбивка слипшихся `use`
+  - добавление недостающих импортов
+  - замена `i32` → `i64` для Go `int`
+  - добавление `pub` к полям
+  - запрет переопределения `ConfigMap`/`DevicesMap`
+
+### Fallback
+
+- при ошибке LLM выполняется fallback на шаблон;
+- при повторяющейся ошибке срабатывает early-stop;
+- максимум 3 попытки.
+
+---
+
+## Маппинг типов Go → Rust
+
+| Go | Rust |
+|---|---|
+| `string` | `String` |
+| `int` | `i64` |
+| `int64` | `i64` |
+| `int32` | `i32` |
+| `uint64` | `u64` |
+| `float64` | `f64` |
+| `bool` | `bool` |
+| `[]T` | `Vec<T>` |
+| `*T` | `Option<T>` |
+| `map[string]string` | `ConfigMap` |
+| `map[string]map[string]string` | `DevicesMap` |
+| `map[K]V` | `HashMap<K, V>` |
+| `time.Time` | `chrono::DateTime<chrono::Utc>` |
+| `interface{}` / `any` | `serde_json::Value` |
+
+### Обработка serde-тегов
+
+| Go-тег | Результат в Rust |
+|---|---|
+| `json:"name"` | `#[serde(rename = "name")]` |
+| `json:"name,omitempty"` | `Option<T>` + `#[serde(skip_serializing_if = "Option::is_none")]` |
+| `yaml:",inline"` | `#[serde(flatten)]` |
+| Поле `type` | `r#type` |
+
+---
+
+## Валидация
+
+Реализована двухуровневая проверка.
+
+### Уровень 1 — локальная compile-time validation
+
+Генератор создаёт временный Cargo-проект и запускает:
+
+```bash
+cargo check --message-format=json
+```
+
+Если проверка не проходит:
+- pipeline откатывается;
+- `.sync_state` не обновляется;
+- PR не создаётся.
+
+### Уровень 2 — CI/CD
+
+После публикации PR Woodpecker проверяет целевой Rust-репозиторий целиком:
+
+- `cargo check --all-targets`
+- `cargo fmt --all --check`
+- email при success / failure
+
+---
+
+## Мониторинг
+
+### Что отслеживается
+
+- `shared/api/*.go`
+- `client/**/*.go`
+
+### Что игнорируется
+
+- подпакеты вроде `shared/api/scriptlet/*.go`
+- `*_test.go`
+
+### State
+
+Состояние последнего успешно обработанного коммита хранится в:
+
+```text
+state/.sync_state
+```
+
+Информация о последнем запуске мониторинга сохраняется в:
+
+```text
+state/changes.json
+```
+
+---
+
+## CI/CD
+
+После успешной генерации система автоматически:
+
+1. создаёт Pull Request в `NightSolist/incus-lab-manager`
+2. триггерит Woodpecker pipeline через REST API
+3. отправляет email инженеру после завершения CI
+
+### Почему self-hosted
+
+- нет входящих соединений извне
+- нет туннелей через third-party сервисы
+- весь трафик остаётся в локальном периметре
+- соблюдаются требования по конфиденциальности
 
 ---
 
@@ -395,7 +564,7 @@ Operation
 |---|---|---|
 | Структур в prototype subset | ≥ 10 | **14** |
 | Файлов на выходе (.rs) | — | **17** |
-| LLM success rate | ≥ 80% | **100%** (5/5) |
+| LLM success rate | ≥ 80% | **100% (5/5)** |
 | Время полного цикла | < 60 сек | **~30 сек** |
 | Compile-time валидация | 100% | **100%** |
 | Ручных правок после генерации | минимум | **0** |
@@ -406,94 +575,83 @@ Operation
 
 ## Безопасность
 
-- **Конфиденциальность кода:** LLM (Qwen2.5-Coder) работает локально через Ollama, код не отправляется в облако
-- **CI/CD:** Self-hosted Woodpecker, нет входящих соединений извне
-- **Секреты:** Токены в `.env` (не в Git), Woodpecker secrets с image-filter
+- **Конфиденциальность кода:** LLM работает локально через Ollama
+- **CI/CD:** self-hosted Woodpecker
+- **Секреты:** токены в `.env`, email-учётные данные — в Woodpecker Secrets
 - **TLS:** Rust-клиент использует mTLS для подключения к Incus
+- **Локальный периметр:** без внешних входящих webhook
 
 ---
 
 ## Troubleshooting
 
-### `make run` падает с "Failed to resolve api.github.com"
-Проблема с DNS. Проверь:
+### `make run` падает с `Failed to resolve api.github.com`
+
+Проверь DNS:
+
 ```bash
 getent hosts api.github.com
 curl -I https://api.github.com
 ```
 
-### `make test-rust-integration` падает с "auth: untrusted"
-Сертификат не в trust store Incus:
+### `make test-rust-integration` падает с `auth: untrusted`
+
+Добавь клиентский сертификат в trust store Incus:
+
 ```bash
 incus config trust add-certificate ~/incus-lab-manager/certs/client.crt --name incus-lab-manager
 ```
 
-### `make test-yaml` падает с "Network interface is too long"
-Имя сети больше 15 символов. В `demo-lab.yaml` имена должны быть короткими.
+### `make test-yaml` падает с ошибкой длины интерфейса
 
-### Изменений не обнаружено при наличии новых коммитов
-Сбрось state:
+Имена сетей в `demo-lab.yaml` должны быть короткими.
+
+### `Изменений не обнаружено`, хотя коммиты есть
+
 ```bash
 make state-reset
 make run
 ```
 
 ### Ollama не отвечает
-Проверь:
+
 ```bash
 make status
 ollama list
-ollama serve  # если не запущен
+ollama serve
+```
+
+### Нужно пересобрать parser
+
+```bash
+make build
+```
+
+### Сломалось Python-окружение
+
+```bash
+make full-reset
+make install
 ```
 
 ---
 
-## Лицензия
+## Связь с Rust-репозиторием
 
-MIT
+Результаты генерации публикуются в:
 
----
+- `NightSolist/incus-lab-manager`
 
-## Автор
+Сгенерированные файлы попадают в:
 
-ВКР, НИЯУ МИФИ, 2026
-EOF
+```text
+src/incus/generated_prototype/
 ```
 
----
+Ручные типы (`ConfigMap`, `DevicesMap`) находятся в:
 
-# Финальные шаги
-
-### 1. Проверим, что всё работает
-
-```bash
-cd ~/dto_converter
-
-# Проверить Makefile
-make help
-
-# Проверить статус системы
-make status
+```text
+src/incus/custom/
 ```
 
-### 2. Если выглядит хорошо — закоммитить
-
-```bash
-git add Makefile README.md
-git commit -m "docs: comprehensive README and Makefile with test/cleanup commands
-
-- Add structured help with grouped commands (Setup/Run/Testing/Cleanup/Diagnostics)
-- Add 4-level testing: pipeline, rust-unit, rust-integration, yaml
-- Add cleanup commands: state-reset, reset-incus, full-reset
-- Add status command for diagnostics
-- Comprehensive README with architecture diagram, setup, usage, troubleshooting"
-git push origin main
-```
-
-### 3. Прогнать тестовый сценарий
-
-```bash
-make status
-make test-pipeline
-make test-rust-unit
-```
+и **не перезаписываются** генератором.
