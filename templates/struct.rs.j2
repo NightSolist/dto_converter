@@ -7,25 +7,30 @@ use std::collections::HashMap;
 {% if needs_serde_json -%}
 use serde_json;
 {% endif -%}
+{% if needs_chrono -%}
+use chrono;
+{% endif -%}
 {% if needs_config_map -%}
 use crate::incus::ConfigMap;
 {% endif -%}
 {% if needs_devices_map -%}
 use crate::incus::DevicesMap;
 {% endif -%}
+{% if needs_config_map_deser -%}
+use crate::incus::config_map::{deserialize_config_map, deserialize_option_config_map};
+{% endif -%}
+{% if needs_devices_map_deser -%}
+use crate::incus::devices_map::{deserialize_devices_map, deserialize_option_devices_map};
+{% endif -%}
 {% for imp in imports -%}
 use crate::incus::{{ imp }};
 {% endfor %}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct {{ name }} {
 {%- for field in fields %}
-    {% if field.rename -%}
-    #[serde(rename = "{{ field.rename }}")]
-    {% endif -%}
-    {% if field.skip_none -%}
-    #[serde(skip_serializing_if = "Option::is_none")]
-    {% endif -%}
+{%- if field.serde_args %}
+    #[serde({{ field.serde_args | join(", ") }})]
+{%- endif %}
     pub {{ field.name }}: {{ field.rust_type }},
 {%- endfor %}
 }

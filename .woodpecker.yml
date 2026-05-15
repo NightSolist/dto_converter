@@ -1,0 +1,124 @@
+when:
+  - event: push
+  - event: manual
+
+steps:
+  # ------------------------------------------------------------
+  # 1. Проверка компиляции
+  # ------------------------------------------------------------
+  - name: cargo-check
+    image: rust:1.83
+    commands:
+      - rustc --version
+      - cargo --version
+      - echo "▶ Compile-time validation of generated Incus DTO..."
+      - cargo check --all-targets
+      - echo "✅ cargo check passed"
+
+  # ------------------------------------------------------------
+  # 2. Проверка форматирования
+  # ------------------------------------------------------------
+  - name: cargo-fmt-check
+    image: rust:1.83
+    commands:
+      - rustup component add rustfmt
+      - echo "▶ Checking Rust formatting..."
+      - cargo fmt --all -- --check
+      - echo "✅ cargo fmt check passed"
+    depends_on:
+      - cargo-check
+
+  # ------------------------------------------------------------
+  # 3. Unit-тесты DTO
+  # ------------------------------------------------------------
+  - name: cargo-test-serde
+    image: rust:1.83
+    commands:
+      - echo "▶ Running serde DTO unit tests..."
+      - cargo test --test serde_dto -- --nocapture
+      - echo "✅ serde DTO tests passed"
+    depends_on:
+      - cargo-fmt-check
+
+  # ------------------------------------------------------------
+  # 4. Уведомление об успехе
+  # ------------------------------------------------------------
+  - name: notify-success
+    image: deblan/woodpecker-email
+    settings:
+      dsn:
+        from_secret: email_dsn
+      from:
+        address:
+          from_secret: email_username
+        name: Incus Rust CI Bot
+      recipients:
+        from_secret: email_recipient
+      recipients_only: true
+      content_type: text/plain
+      subject: "✅ incus-lab-manager CI: проверка прошла (pipeline #${CI_PIPELINE_NUMBER})"
+      body: |
+        Здравствуйте!
+
+        CI pipeline для incus-lab-manager успешно завершён.
+
+        Что было выполнено:
+          • cargo check --all-targets
+          • cargo fmt --all -- --check
+          • cargo test --test serde_dto -- --nocapture
+
+        Сводка:
+          • Репозиторий: ${CI_REPO}
+          • Ветка: ${CI_COMMIT_BRANCH}
+          • Коммит: ${CI_COMMIT_SHA}
+          • Pipeline: ${CI_PIPELINE_URL}
+
+        Integration-тесты с реальным Incus в CI не запускались.
+        Они выполняются локально вручную.
+
+        —
+        Incus Rust CI Bot
+    when:
+      - status: success
+    depends_on:
+      - cargo-test-serde
+
+  # ------------------------------------------------------------
+  # 5. Уведомление об ошибке
+  # ------------------------------------------------------------
+  - name: notify-failure
+    image: deblan/woodpecker-email
+    settings:
+      dsn:
+        from_secret: email_dsn
+      from:
+        address:
+          from_secret: email_username
+        name: Incus Rust CI Bot
+      recipients:
+        from_secret: email_recipient
+      recipients_only: true
+      content_type: text/plain
+      subject: "⚠️ incus-lab-manager CI: ошибка проверки (pipeline #${CI_PIPELINE_NUMBER})"
+      body: |
+        Здравствуйте!
+
+        CI pipeline для incus-lab-manager завершился с ошибкой.
+
+        Возможные этапы отказа:
+          • cargo check
+          • cargo fmt --check
+          • cargo test --test serde_dto
+
+        Сводка:
+          • Репозиторий: ${CI_REPO}
+          • Ветка: ${CI_COMMIT_BRANCH}
+          • Коммит: ${CI_COMMIT_SHA}
+          • Pipeline: ${CI_PIPELINE_URL}
+
+        Требуется анализ логов pipeline.
+
+        —
+        Incus Rust CI Bot
+    when:
+      - status: failure

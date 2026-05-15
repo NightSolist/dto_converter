@@ -1,0 +1,12 @@
+// Auto-generated. Do not edit.
+
+{% if needs_hashmap -%}
+use std::collections::HashMap;
+{% endif -%}
+{% if needs_serde_json -%}
+use serde_json;
+{% endif -%}
+{% for imp in imports -%}
+use crate::incus::{{ imp }};
+{% endfor %}
+pub type {{ name }} = {{ rust_type }};

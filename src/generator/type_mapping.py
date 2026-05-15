@@ -15,17 +15,19 @@ TYPE_MAP = {
     "any": "serde_json::Value",
 }
 
-# Специальные map-типы — проверяются ДО общего парсинга map[]
+# Специальные map-типы Go — маппируются на
+# автоматически генерируемые типы с кастомной десериализацией
 SPECIAL_MAP_TYPES = {
     "map[string]string": "ConfigMap",
     "map[string]map[string]string": "DevicesMap",
 }
 
-PRIMITIVES = set(TYPE_MAP.keys())
-
-
-def is_supported_type(go_type: str) -> bool:
-    return True  # В Stage 2 мы пробуем генерировать всё
+# Типы, определённые в crate::incus —
+# не раскрываем в примитивы при маппинге
+KNOWN_INCUS_TYPES = {
+    "ConfigMap",
+    "DevicesMap",
+}
 
 
 def map_go_type(go_type: str) -> str:
@@ -34,6 +36,10 @@ def map_go_type(go_type: str) -> str:
     # Специальные map-типы — проверяем первыми
     if t in SPECIAL_MAP_TYPES:
         return SPECIAL_MAP_TYPES[t]
+
+    # Известные Incus-типы — возвращаем как есть
+    if t in KNOWN_INCUS_TYPES:
+        return t
 
     if t.startswith("[]"):
         inner = map_go_type(t[2:])
@@ -46,15 +52,14 @@ def map_go_type(go_type: str) -> str:
     if t.startswith("map["):
         bracket_level = 0
         for i, char in enumerate(t):
-            if char == '[':
+            if char == "[":
                 bracket_level += 1
-            elif char == ']':
+            elif char == "]":
                 bracket_level -= 1
 
             if bracket_level == 0 and i > 3:
                 key_type = t[4:i]
-                value_type = t[i+1:]
-
+                value_type = t[i + 1:]
                 rust_key = map_go_type(key_type)
                 rust_value = map_go_type(value_type)
                 return f"HashMap<{rust_key}, {rust_value}>"

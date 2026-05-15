@@ -4,7 +4,7 @@ from src.parser.regex_parser import RegexParser
 
 class ParserFactory:
     @staticmethod
-    def create(backend: str = "regex"):
+    def create(backend: str = "ast"):
         if backend == "regex":
             return RegexParser()
         elif backend == "ast":

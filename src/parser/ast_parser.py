@@ -13,16 +13,19 @@ logger = logging.getLogger(__name__)
 
 class ASTParser(GoParserInterface):
     def __init__(self):
-        self.tool_path = Path(__file__).parent.parent / "go-ast-parser" / "parser"
+        self.tool_path = (
+            Path(__file__).parent.parent / "go-ast-parser" / "parser"
+        )
 
     def parse_directory(
         self, api_dir: Path
     ) -> Tuple[Dict[str, GoStruct], Dict[str, GoEnum], Dict[str, GoAlias]]:
         if not self.tool_path.exists():
-            raise RuntimeError(f"Go AST tool not found at {self.tool_path}")
+            raise RuntimeError(
+                f"Go AST tool not found at {self.tool_path}"
+            )
 
         cmd = [str(self.tool_path), "-dir", str(api_dir)]
-
         result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode != 0:
@@ -51,10 +54,13 @@ class ASTParser(GoParserInterface):
             raw_aliases = pkg.get("aliases") or []
             for a_data in raw_aliases:
                 aliases[a_data["name"]] = GoAlias(
-                    name=a_data["name"], target_type=a_data["type"]
+                    name=a_data["name"],
+                    target_type=a_data["type"],
                 )
 
-        self._resolve_embeddings(structs)
+        # Намеренно НЕ разворачиваем embedding.
+        # Embedded-структуры обрабатываются генератором
+        # через #[serde(flatten)].
 
         return structs, enums, aliases
 
@@ -86,7 +92,11 @@ class ASTParser(GoParserInterface):
         for v in data.get("values", []):
             values.append((v["name"], v["value"]))
 
-        return GoEnum(name=data["name"], base_type=data["type"], values=values)
+        return GoEnum(
+            name=data["name"],
+            base_type=data["type"],
+            values=values,
+        )
 
     def _parse_tag(self, raw_tag: str) -> GoTag:
         tag = GoTag()
@@ -105,15 +115,3 @@ class ASTParser(GoParserInterface):
             tag.inline = "inline" in parts
 
         return tag
-
-    def _resolve_embeddings(self, structs: Dict[str, GoStruct]):
-        for name, struct in structs.items():
-            if not struct.embedded:
-                continue
-
-            for embedded_name in struct.embedded:
-                clean_name = embedded_name.lstrip("*").split(".")[-1]
-
-                if clean_name in structs:
-                    parent = structs[clean_name]
-                    struct.fields.extend(parent.fields)

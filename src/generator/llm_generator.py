@@ -3,86 +3,159 @@ from typing import Optional, Tuple
 
 import requests
 
-from src.parser.go_types import GoStruct
-
 
 CODE_FENCE = "```"
 
 SYSTEM_PROMPT = f"""
-Ты — ИИ-ассистент, который преобразует структуры Go в идиоматичный Rust с поддержкой serde.
+Ты — ИИ-ассистент, который исправляет Rust-код,
+автоматически сгенерированный шаблонным генератором
+из Go-моделей Incus.
 
-Правила трансформации типов (СТРОГО СОБЛЮДАЙ):
-- string → String
-- int → i64  (НИКОГДА не используй i32 для Go int)
-- int64 → i64
-- int32 → i32
-- uint → u64
-- uint64 → u64
-- uint32 → u32
-- float64 → f64
-- bool → bool
-- []T → Vec<T>
-- map[string]string → ConfigMap
-- map[string]map[string]string → DevicesMap
-- time.Time → chrono::DateTime<chrono::Utc>
-- interface{{}} / any → serde_json::Value
+ТВОЯ ЗАДАЧА:
+- НЕ переписывать код с нуля.
+- Минимально исправить шаблонный Rust-код,
+  чтобы он компилировался.
+- Сохранять структуру, стиль и имена,
+  заданные шаблоном.
+- Менять только то, что вызывает ошибку.
 
-Правила генерации:
-1. Всегда добавляй:
-   #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+ПРАВИЛА СИНХРОНИЗАЦИИ Go -> Rust:
+- string -> String
+- int -> i64  (НИКОГДА не i32 для Go int)
+- int64 -> i64
+- int32 -> i32
+- uint -> u64
+- uint64 -> u64
+- uint32 -> u32
+- float64 -> f64
+- bool -> bool
+- []T -> Vec<T>
+- *T -> Option<T>
+- map[string]string -> ConfigMap
+- map[string]map[string]string -> DevicesMap
+- time.Time -> chrono::DateTime<chrono::Utc>
+- interface{{}} / any -> serde_json::Value
 
-2. ВСЕ поля структуры ОБЯЗАТЕЛЬНО объявляй с модификатором pub:
-   pub config: ConfigMap,
-   pub description: String,
-   НИКОГДА не пиши поля без pub.
+ПРАВИЛА serde:
+- json:"name" -> #[serde(rename = "name")]
+  только если JSON-имя отличается от snake_case поля
+- omitempty -> Option<T> +
+  #[serde(skip_serializing_if = "Option::is_none")]
+- yaml:",inline" -> #[serde(flatten)]
+- поле type -> r#type + #[serde(rename = "type")]
+- JSON-имя с дефисом (base-image) ->
+  поле base_image + #[serde(rename = "base-image")]
 
-3. Всегда подключай serde:
-   use serde::{{Serialize, Deserialize}};
+ПРАВИЛА ПО ConfigMap / DevicesMap:
+- Эти типы уже существуют в crate::incus.
+- Для них также существуют helper-функции:
+    deserialize_config_map
+    deserialize_option_config_map
+    deserialize_devices_map
+    deserialize_option_devices_map
+- НЕ объявляй ConfigMap и DevicesMap заново.
+- НЕ создавай локальные type/struct/enum с такими именами.
+- Просто добавь нужный импорт если он отсутствует.
 
-4. Если используется ConfigMap, добавь:
-   use crate::incus::ConfigMap;
-
-5. Если используется DevicesMap, добавь:
-   use crate::incus::DevicesMap;
-
-6. Если поле имеет тег json:"name", используй:
-   #[serde(rename = "name")]
-
-7. Если поле имеет omitempty:
-   - оберни тип в Option<T>
-   - добавь #[serde(skip_serializing_if = "Option::is_none")]
-
-8. Если структура встроенная через yaml:",inline":
-   используй #[serde(flatten)]
-
-9. Если имя поля является ключевым словом Rust (например type),
-   используй r#type.
-
-ВАЖНО:
-- ConfigMap и DevicesMap уже существуют в crate::incus
-- НЕ объявляй их заново внутри файла
-- НЕ создавай локальные type/struct/enum ConfigMap
-- НЕ создавай локальные type/struct/enum DevicesMap
-- Просто импортируй их из crate::incus
-
-Пример правильного результата:
-
+ФОРМАТ ОТВЕТА:
+Верни ТОЛЬКО исправленный Rust-код внутри блока:
 {CODE_FENCE}rust
-use serde::{{Serialize, Deserialize}};
-use crate::incus::ConfigMap;
-use crate::incus::DevicesMap;
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ProfilePut {{
-    pub config: ConfigMap,
-    pub description: String,
-    pub devices: DevicesMap,
-}}
+...
 {CODE_FENCE}
-
-Верни только готовый Rust-код внутри блока {CODE_FENCE}rust ... {CODE_FENCE}.
-Без пояснений, комментариев и лишнего текста.
+Без пояснений и комментариев.
 """
+
+FEW_SHOT_EXAMPLES = [
+    {
+        "user": (
+            "Ниже Go-код, шаблонный Rust-код и ошибка компиляции.\n\n"
+            "Go-код:\n"
+            f"{CODE_FENCE}go\n"
+            "type NetworkPut struct {\n"
+            '    Config      ConfigMap `json:"config" yaml:"config"`\n'
+            '    Description string    `json:"description" yaml:"description"`\n'
+            "}\n"
+            f"{CODE_FENCE}\n\n"
+            "Шаблонный Rust-код:\n"
+            f"{CODE_FENCE}rust\n"
+            "use serde::{Serialize, Deserialize};\n"
+            "\n"
+            "#[derive(Debug, Clone, Serialize, Deserialize, Default)]\n"
+            "pub struct NetworkPut {\n"
+            "    pub config: ConfigMap,\n"
+            "    pub description: String,\n"
+            "}\n"
+            f"{CODE_FENCE}\n\n"
+            "Ошибка компиляции:\n"
+            f"{CODE_FENCE}\n"
+            "cannot find type `ConfigMap` in this scope\n"
+            f"{CODE_FENCE}\n\n"
+            "Исправь шаблонный Rust-код минимально."
+        ),
+        "assistant": (
+            f"{CODE_FENCE}rust\n"
+            "use serde::{Serialize, Deserialize};\n"
+            "use crate::incus::ConfigMap;\n"
+            "use crate::incus::config_map::deserialize_config_map;\n"
+            "\n"
+            "#[derive(Debug, Clone, Serialize, Deserialize, Default)]\n"
+            "pub struct NetworkPut {\n"
+            "    #[serde(deserialize_with = \"deserialize_config_map\")]\n"
+            "    pub config: ConfigMap,\n"
+            "    pub description: String,\n"
+            "}\n"
+            f"{CODE_FENCE}"
+        ),
+    },
+    {
+        "user": (
+            "Ниже Go-код, шаблонный Rust-код и ошибка компиляции.\n\n"
+            "Go-код:\n"
+            f"{CODE_FENCE}go\n"
+            "type InstanceSource struct {\n"
+            '    Type      string `json:"type" yaml:"type"`\n'
+            '    BaseImage string `json:"base-image,omitempty"`\n'
+            '    Live      bool   `json:"live,omitempty"`\n'
+            "}\n"
+            f"{CODE_FENCE}\n\n"
+            "Шаблонный Rust-код:\n"
+            f"{CODE_FENCE}rust\n"
+            "use serde::{Serialize, Deserialize};\n"
+            "\n"
+            "#[derive(Debug, Clone, Serialize, Deserialize, Default)]\n"
+            "pub struct InstanceSource {\n"
+            "    #[serde(rename = \"type\")]\n"
+            "    pub r#type: String,\n"
+            "    #[serde(skip_serializing_if = \"Option::is_none\")]\n"
+            "    pub baseimage: Option<String>,\n"
+            "    #[serde(skip_serializing_if = \"Option::is_none\")]\n"
+            "    pub live: Option<bool>,\n"
+            "}\n"
+            f"{CODE_FENCE}\n\n"
+            "Ошибка компиляции:\n"
+            f"{CODE_FENCE}\n"
+            "поле baseimage должно сериализоваться как base-image\n"
+            f"{CODE_FENCE}\n\n"
+            "Исправь шаблонный Rust-код минимально."
+        ),
+        "assistant": (
+            f"{CODE_FENCE}rust\n"
+            "use serde::{Serialize, Deserialize};\n"
+            "\n"
+            "#[derive(Debug, Clone, Serialize, Deserialize, Default)]\n"
+            "pub struct InstanceSource {\n"
+            "    #[serde(rename = \"type\")]\n"
+            "    pub r#type: String,\n"
+            "    #[serde(rename = \"base-image\","
+            " skip_serializing_if = \"Option::is_none\")]\n"
+            "    pub base_image: Option<String>,\n"
+            "    #[serde(skip_serializing_if = \"Option::is_none\")]\n"
+            "    pub live: Option<bool>,\n"
+            "}\n"
+            f"{CODE_FENCE}"
+        ),
+    },
+]
 
 
 class LLMGenerator:
@@ -98,31 +171,38 @@ class LLMGenerator:
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
 
-    def generate(
+    def repair(
         self,
-        go_struct: GoStruct,
+        entity_name: str,
+        raw_go_code: str,
+        template_rust_code: str,
+        initial_error: str,
         validator,
         test_env_files: dict[str, str],
-        raw_go_code: str,
+        filename: str,
     ) -> Tuple[bool, Optional[str], str]:
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Преобразуй этот Go-код в Rust:\n"
-                    f"{CODE_FENCE}go\n{raw_go_code}\n{CODE_FENCE}"
-                ),
-            },
-        ]
-
-        filename = f"{self._camel_to_snake(go_struct.name)}.rs"
-
+        """
+        Исправляет шаблонно сгенерированный Rust-код.
+        Получает на вход шаблонный результат и ошибку компиляции.
+        Возвращает (success, rust_code | None, info).
+        """
         last_error_normalized = None
         repeated_same_error_count = 0
+        current_rust_code = template_rust_code
+        error_feedback = initial_error
 
         for attempt in range(1, self.max_retries + 1):
-            print(f"      🤖 [LLM] Попытка {attempt}/{self.max_retries} для {go_struct.name}...")
+            print(
+                f"      🤖 [LLM repair] "
+                f"Попытка {attempt}/{self.max_retries} "
+                f"для {entity_name}..."
+            )
+
+            messages = self._build_repair_messages(
+                raw_go_code=raw_go_code,
+                template_rust_code=current_rust_code,
+                error_feedback=error_feedback,
+            )
 
             try:
                 response = requests.post(
@@ -141,55 +221,49 @@ class LLMGenerator:
             except requests.RequestException as e:
                 return False, None, f"Ошибка API Ollama: {e}"
 
-            content = response.json().get("message", {}).get("content", "")
+            content = (
+                response.json()
+                .get("message", {})
+                .get("content", "")
+            )
             rust_code = self._extract_rust_code(content)
 
             if not rust_code:
-                error_msg = f"Модель не вернула блок {CODE_FENCE}rust{CODE_FENCE}."
-                print(f"      ⚠️ [LLM] Ошибка (попытка {attempt}): {error_msg}")
-                messages.append({"role": "assistant", "content": content})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Верни только Rust-код внутри блока "
-                            f"{CODE_FENCE}rust ... {CODE_FENCE} без пояснений."
-                        ),
-                    }
+                error_feedback = (
+                    f"Модель не вернула блок "
+                    f"{CODE_FENCE}rust{CODE_FENCE}. "
+                    f"Верни только исправленный Rust-код "
+                    f"внутри блока "
+                    f"{CODE_FENCE}rust ... {CODE_FENCE}."
+                )
+                print(
+                    f"      ⚠️ [LLM repair] "
+                    f"Нет блока rust (попытка {attempt})"
                 )
                 continue
 
             rust_code = self._split_use_statements(rust_code)
-            rust_code = self._ensure_imports(rust_code)
-            rust_code = self._fix_int_types(rust_code, raw_go_code)
             rust_code = self._ensure_pub_fields(rust_code)
+            rust_code = self._fix_int_types(rust_code, raw_go_code)
 
-            forbidden_error = self._check_forbidden_local_types(rust_code)
-            if forbidden_error:
-                print(f"      ⚠️ [LLM] Ошибка (попытка {attempt}): {forbidden_error}")
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": f"{CODE_FENCE}rust\n{rust_code}\n{CODE_FENCE}",
-                    }
-                )
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": forbidden_error + "\nИсправь код и верни полный правильный файл.",
-                    }
-                )
-                continue
-
-            val_res = validator.validate_single(filename, rust_code, test_env_files)
+            val_res = validator.validate_single(
+                filename, rust_code, test_env_files
+            )
 
             if val_res.passed:
                 return True, rust_code, f"Успех с попытки {attempt}"
 
-            error_msg = val_res.error_message or "Неизвестная ошибка компиляции"
+            error_msg = (
+                val_res.error_message
+                or "Неизвестная ошибка компиляции"
+            )
             normalized_error = self._normalize_error(error_msg)
 
-            print(f"      ⚠️ [LLM] Ошибка (попытка {attempt}): {error_msg}")
+            print(
+                f"      ⚠️ [LLM repair] "
+                f"Ошибка (попытка {attempt}): "
+                f"{error_msg[:120]}..."
+            )
 
             if normalized_error == last_error_normalized:
                 repeated_same_error_count += 1
@@ -199,100 +273,88 @@ class LLMGenerator:
             last_error_normalized = normalized_error
 
             if repeated_same_error_count >= 1:
-                return False, None, f"Повторяющаяся ошибка LLM: {error_msg}"
+                return (
+                    False,
+                    None,
+                    f"Повторяющаяся ошибка: {error_msg}",
+                )
 
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": f"{CODE_FENCE}rust\n{rust_code}\n{CODE_FENCE}",
-                }
-            )
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "Твой код не компилируется. Ошибка cargo check:\n"
-                        f"{error_msg}\n"
-                        "Исправь ошибку. "
-                        "Не объявляй локально ConfigMap и DevicesMap. "
-                        "Если они нужны, просто импортируй их из crate::incus."
-                    ),
-                }
-            )
+            current_rust_code = rust_code
+            error_feedback = error_msg
 
-        return False, None, "Исчерпан лимит попыток LLM"
+        return False, None, "Исчерпан лимит попыток LLM repair"
+
+    def _build_repair_messages(
+        self,
+        raw_go_code: str,
+        template_rust_code: str,
+        error_feedback: str,
+    ) -> list[dict]:
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+        ]
+
+        for example in FEW_SHOT_EXAMPLES:
+            messages.append({
+                "role": "user",
+                "content": example["user"].strip(),
+            })
+            messages.append({
+                "role": "assistant",
+                "content": example["assistant"].strip(),
+            })
+
+        user_prompt = (
+            "Ниже Go-код, шаблонно сгенерированный Rust-код "
+            "и ошибка компиляции.\n\n"
+            f"Go-код:\n"
+            f"{CODE_FENCE}go\n{raw_go_code}\n{CODE_FENCE}\n\n"
+            f"Шаблонный/текущий Rust-код:\n"
+            f"{CODE_FENCE}rust\n{template_rust_code}\n{CODE_FENCE}\n\n"
+            f"Ошибка компиляции:\n"
+            f"{CODE_FENCE}\n{error_feedback}\n{CODE_FENCE}\n\n"
+            "Исправь Rust-код минимально.\n"
+            "Не переписывай файл заново.\n"
+            "Сохрани стиль шаблонной генерации.\n"
+            "Верни только исправленный Rust-код."
+        )
+
+        messages.append({
+            "role": "user",
+            "content": user_prompt.strip(),
+        })
+        return messages
 
     def _extract_rust_code(self, text: str) -> Optional[str]:
-        pattern = re.escape(CODE_FENCE) + r"rust\s*(.*?)\s*" + re.escape(CODE_FENCE)
+        pattern = (
+            re.escape(CODE_FENCE)
+            + r"rust\s*(.*?)\s*"
+            + re.escape(CODE_FENCE)
+        )
         match = re.search(pattern, text, re.DOTALL)
         if match:
             return match.group(1).strip()
         return None
 
     def _split_use_statements(self, rust_code: str) -> str:
-        """
-        Разбивает слипшиеся use-statements на отдельные строки.
-        Например: 'use a;use b;' -> 'use a;\\nuse b;'
-        """
         lines = rust_code.splitlines()
         result = []
         for line in lines:
             if line.count("use ") > 1:
-                parts = [p.strip() for p in line.split(";") if p.strip()]
+                parts = [
+                    p.strip()
+                    for p in line.split(";")
+                    if p.strip()
+                ]
                 for part in parts:
                     if not part.endswith(";"):
-                        part = part + ";"
+                        part += ";"
                     result.append(part)
             else:
                 result.append(line)
         return "\n".join(result)
 
-    def _ensure_imports(self, rust_code: str) -> str:
-        """
-        Автоматически добавляет недостающие импорты для ConfigMap и DevicesMap,
-        если модель использовала тип, но забыла сделать use.
-        Проверяет наличие импорта по содержимому кода, а не по точному совпадению строки.
-        """
-        needs_config_map = (
-            "ConfigMap" in rust_code
-            and "use crate::incus::ConfigMap;" not in rust_code
-        )
-        needs_devices_map = (
-            "DevicesMap" in rust_code
-            and "use crate::incus::DevicesMap;" not in rust_code
-        )
-
-        if not needs_config_map and not needs_devices_map:
-            return rust_code
-
-        import_lines = []
-        if needs_config_map:
-            import_lines.append("use crate::incus::ConfigMap;")
-        if needs_devices_map:
-            import_lines.append("use crate::incus::DevicesMap;")
-
-        lines = rust_code.splitlines()
-        insert_pos = 0
-
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped.startswith("use "):
-                insert_pos = i + 1
-            elif stripped.startswith("#[derive"):
-                if insert_pos == 0:
-                    insert_pos = i
-                break
-
-        for offset, import_line in enumerate(import_lines):
-            lines.insert(insert_pos + offset, import_line)
-
-        return "\n".join(lines)
-    
     def _ensure_pub_fields(self, rust_code: str) -> str:
-        """
-        Гарантирует, что все поля внутри pub struct имеют модификатор pub.
-        LLM иногда забывает добавить pub для простых структур.
-        """
         lines = rust_code.splitlines()
         result = []
         inside_struct = False
@@ -301,24 +363,22 @@ class LLMGenerator:
         for line in lines:
             stripped = line.strip()
 
-            # Детектируем начало pub struct
             if re.match(r'^\s*pub\s+struct\s+\w+', line):
                 inside_struct = True
                 result.append(line)
-                if '{' in line:
-                    brace_depth += line.count('{') - line.count('}')
+                brace_depth += line.count("{") - line.count("}")
                 continue
 
             if inside_struct:
-                brace_depth += line.count('{') - line.count('}')
+                brace_depth += line.count("{") - line.count("}")
 
-                # Поле выглядит как `name: Type,` — добавим pub
-                # Не трогаем строки с #[...] и закрывающую }
-                is_attr = stripped.startswith('#[')
-                is_close = stripped.startswith('}')
+                is_attr = stripped.startswith("#[")
+                is_close = stripped.startswith("}")
                 is_blank = not stripped
-                already_pub = stripped.startswith('pub ')
-                looks_like_field = bool(re.match(r'^[a-zA-Z_][\w#]*\s*:', stripped))
+                already_pub = stripped.startswith("pub ")
+                looks_like_field = bool(
+                    re.match(r'^[a-zA-Z_][\w#]*\s*:', stripped)
+                )
 
                 if (
                     not is_attr
@@ -327,8 +387,7 @@ class LLMGenerator:
                     and not already_pub
                     and looks_like_field
                 ):
-                    # Сохраняем отступ
-                    indent = line[:len(line) - len(line.lstrip())]
+                    indent = line[: len(line) - len(line.lstrip())]
                     line = f"{indent}pub {stripped}"
 
                 if brace_depth <= 0:
@@ -338,15 +397,12 @@ class LLMGenerator:
 
         return "\n".join(result)
 
-    def _fix_int_types(self, rust_code: str, raw_go_code: str) -> str:
-        """
-        Исправляет i32 -> i64 для полей, которые в Go объявлены
-        как int (не int32, не int64).
-        """
-        go_int_fields = set(re.findall(
-            r'\b(\w+)\s+int\b(?!\d)',
-            raw_go_code
-        ))
+    def _fix_int_types(
+        self, rust_code: str, raw_go_code: str
+    ) -> str:
+        go_int_fields = set(
+            re.findall(r'\b(\w+)\s+int\b(?!\d)', raw_go_code)
+        )
 
         if not go_int_fields:
             return rust_code
@@ -357,32 +413,12 @@ class LLMGenerator:
         for line in lines:
             for field in go_int_fields:
                 snake_field = self._camel_to_snake(field)
-                if snake_field in line.lower() and 'i32' in line:
-                    line = line.replace('i32', 'i64')
+                if snake_field in line.lower() and "i32" in line:
+                    line = line.replace("i32", "i64")
                     break
             result.append(line)
 
         return "\n".join(result)
-
-    def _check_forbidden_local_types(self, rust_code: str) -> Optional[str]:
-        forbidden_patterns = [
-            r"\b(pub\s+)?type\s+ConfigMap\b",
-            r"\b(pub\s+)?struct\s+ConfigMap\b",
-            r"\b(pub\s+)?enum\s+ConfigMap\b",
-            r"\b(pub\s+)?type\s+DevicesMap\b",
-            r"\b(pub\s+)?struct\s+DevicesMap\b",
-            r"\b(pub\s+)?enum\s+DevicesMap\b",
-        ]
-
-        for pattern in forbidden_patterns:
-            if re.search(pattern, rust_code):
-                return (
-                    "Запрещено объявлять ConfigMap или DevicesMap внутри "
-                    "сгенерированного файла. Эти типы уже существуют в crate::incus "
-                    "и должны только импортироваться."
-                )
-
-        return None
 
     def _normalize_error(self, error_msg: str) -> str:
         normalized = error_msg.strip().lower()

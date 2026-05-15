@@ -1,135 +1,65 @@
+import json
 import os
-import re
 from pathlib import Path
 
 from src.config import Config
 from src.dispatcher import Dispatcher
+from src.email_notifier import EmailNotifier, EmailNotifierError
 from src.generator.llm_generator import LLMGenerator
-from src.generator.rust_generator import RustGenerator
+from src.generator.rust_generator import RustGenerator, camel_to_snake
 from src.parser.factory import ParserFactory
 from src.validation.validator import RustValidator
 
 
-# Включает режим прототипа:
-# - фильтрация только по whitelist прототипа
-# - вывод по умолчанию идет в prototype_output_dir
 PROTOTYPE_MODE = True
 
-# Типы, которые пишутся вручную и не должны перезаписываться генератором
-MANUAL_TYPES = {"ConfigMap", "DevicesMap"}
-
-# Если структура содержит такие типы, она попадает в категорию "сложных"
-TYPES_REQUIRING_LLM = {"ConfigMap", "DevicesMap"}
-
-# ============================================================
-# PROTOTYPE STRUCT WHITELIST
-# ============================================================
-# Вариант 1:
-# минимальный deployment subset с уже настроенным доступом к Incus.
-#
-# Цель:
-# - создать сеть
-# - создать профиль
-# - создать storage pool
-# - создать экземпляры (VM / container)
-# - управлять состоянием экземпляров
-# - отслеживать асинхронные операции
-#
-# Не включает:
-# - Certificate*
-# - Project*
-# - Cluster*
-# - Image*
-# - Instance / InstanceFull / InstancePost
-# - InstanceSnapshot
-# ============================================================
 PROTOTYPE_STRUCT_WHITELIST = {
-    # network.go
     "Network",
     "NetworkPut",
     "NetworksPost",
-
-    # profile.go
     "Profile",
     "ProfilePut",
     "ProfilesPost",
-
-    # storage_pool.go
     "StoragePool",
     "StoragePoolPut",
     "StoragePoolsPost",
-
-    # instance.go
     "InstancePut",
-
-    # instances_post.go
     "InstancesPost",
-
-    # instance_source.go
     "InstanceSource",
-
-    # instance_state.go
     "InstanceStatePut",
-
-    # operation.go
     "Operation",
 }
 
-# ============================================================
-# PROTOTYPE ENUM / ALIAS WHITELIST
-# ============================================================
-# StatusCode нужен для Operation.
-# InstanceType нужен для InstancesPost.
-# InstanceType может быть либо enum, либо alias — поэтому
-# он указан в обоих whitelist.
-# ============================================================
 PROTOTYPE_ENUM_WHITELIST = {
     "InstanceType",
     "StatusCode",
 }
 
 PROTOTYPE_ALIAS_WHITELIST = {
-    "InstanceType",
+    "ConfigMap",
+    "DevicesMap",
 }
-
-# ============================================================
-# LLM TEST WHITELIST
-# ============================================================
-# Оставляем только уже подтвержденный стабильный набор.
-# Всё остальное внутри prototype subset пока идет шаблонно.
-# ============================================================
-LLM_TEST_WHITELIST = {
-    "ProfilePut",
-    "ProfilesPost",
-    "InstancePut",
-    "NetworkPut",
-    "StoragePoolPut",
-}
-
-
-def camel_to_snake(name: str) -> str:
-    s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
-    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1).lower()
 
 
 class Pipeline:
     def __init__(self):
         self.config = Config()
         self.parser = ParserFactory.create("ast")
-        self.dispatcher = Dispatcher(
-            manual_types=MANUAL_TYPES,
-            custom_types_requiring_llm=TYPES_REQUIRING_LLM,
-        )
+        self.dispatcher = Dispatcher()
         self.validator = RustValidator()
+        self.llm_generator = LLMGenerator()
         self.generator = None
 
-    def run(self):
+    def run(self) -> bool:
         env_output = os.getenv("OUTPUT_DIR")
         if env_output:
             self.config.output_dir = Path(env_output)
         elif PROTOTYPE_MODE:
             self.config.output_dir = self.config.prototype_output_dir
-            print(f"🧪 Prototype mode enabled. Output dir: {self.config.output_dir}")
+            print(
+                f"🧪 Prototype mode enabled. "
+                f"Output dir: {self.config.output_dir}"
+            )
 
         api_path = self.config.incus_repo_path / self.config.api_subdir
 
@@ -141,224 +71,404 @@ class Pipeline:
         parsed_alias_count = len(aliases)
 
         if PROTOTYPE_MODE:
-            structs = self._filter_structs_for_prototype(structs)
-            enums, aliases = self._filter_support_types_for_prototype(
-                enums=enums,
-                aliases=aliases,
-                structs=structs,
-            )
-
+            structs = {
+                k: v for k, v in structs.items()
+                if k in PROTOTYPE_STRUCT_WHITELIST
+            }
+            enums = {
+                k: v for k, v in enums.items()
+                if k in PROTOTYPE_ENUM_WHITELIST
+            }
+            aliases = {
+                k: v for k, v in aliases.items()
+                if k in PROTOTYPE_ALIAS_WHITELIST
+            }
             print(
-                f"🧪 Prototype whitelist enabled: "
-                f"{len(structs)}/{parsed_struct_count} structs kept"
+                f"🧪 Prototype filter: "
+                f"{len(structs)} structs, "
+                f"{len(enums)} enums, "
+                f"{len(aliases)} aliases"
             )
-            print(f"🧪 Prototype enums kept: {sorted(enums.keys()) or '—'}")
-            print(f"🧪 Prototype aliases kept: {sorted(aliases.keys()) or '—'}")
 
-        print("🔀 Dispatching entities...")
         dispatch_res = self.dispatcher.dispatch(structs, enums, aliases)
-
         self.generator = RustGenerator(dispatch_res.known_types)
 
         generated_files: dict[str, str] = {}
         mod_entities: list[tuple[str, str]] = []
+        failed_entities: list[dict] = []
 
-        # --- Шаблонная генерация enum ---
-        for name, enum_obj in dispatch_res.template_enums.items():
+        # Уже успешно сгенерированные файлы.
+        # Они передаются в validate_single как support_files
+        test_env_files: dict[str, str] = {}
+
+        # ============================================================
+        # 1. ALIASES
+        # ============================================================
+        print(f"\n── Aliases ({len(dispatch_res.aliases)}) ──")
+        for name, alias_obj in sorted(dispatch_res.aliases.items()):
             mod_name = camel_to_snake(name)
-            generated_files[f"{mod_name}.rs"] = self.generator.generate_enum(enum_obj)
-            mod_entities.append((name, mod_name))
+            filename = f"{mod_name}.rs"
+            print(f"\n📙 {name}")
 
-        # --- Шаблонная генерация alias ---
-        for name, alias_obj in dispatch_res.template_aliases.items():
-            mod_name = camel_to_snake(name)
-            generated_files[f"{mod_name}.rs"] = self.generator.generate_alias(alias_obj)
-            mod_entities.append((name, mod_name))
-
-        # --- Шаблонная генерация простых struct ---
-        for name, struct_obj in dispatch_res.template_structs.items():
-            mod_name = camel_to_snake(name)
-            generated_files[f"{mod_name}.rs"] = self.generator.generate_struct(struct_obj)
-            mod_entities.append((name, mod_name))
-
-        # --- Обработка сложных структур ---
-        llm_success = 0
-        llm_failed = 0
-        llm_fallback = 0
-
-        if dispatch_res.llm_structs:
-            print(
-                f"\n🧠 Начинаем обработку сложных структур "
-                f"({len(dispatch_res.llm_structs)})..."
+            template_code = self.generator.generate_alias(alias_obj)
+            template_res = self.validator.validate_single(
+                filename, template_code, test_env_files
             )
-            llm_generator = LLMGenerator()
 
-            for name, struct_obj in dispatch_res.llm_structs.items():
+            if template_res.passed:
+                generated_files[filename] = template_code
+                test_env_files[filename] = template_code
+                mod_entities.append((name, mod_name))
+                print("   ✅ template passed")
+                continue
+
+            print(
+                f"   ⚠️ template error: "
+                f"{template_res.error_message}"
+            )
+
+            raw_go = self._build_raw_go_alias(alias_obj)
+            success, repaired, info = self.llm_generator.repair(
+                entity_name=name,
+                raw_go_code=raw_go,
+                template_rust_code=template_code,
+                initial_error=template_res.error_message or "Unknown error",
+                validator=self.validator,
+                test_env_files=test_env_files,
+                filename=filename,
+            )
+
+            if success and repaired:
+                generated_files[filename] = repaired
+                test_env_files[filename] = repaired
+                mod_entities.append((name, mod_name))
+                print(f"   ✅ llm repair passed ({info})")
+            else:
+                failed_entities.append({
+                    "name": name,
+                    "kind": "alias",
+                    "error": info,
+                })
+                print(f"   ❌ failed: {info}")
+
+        # ============================================================
+        # 2. ENUMS
+        # ============================================================
+        print(f"\n── Enums ({len(dispatch_res.enums)}) ──")
+        for name, enum_obj in sorted(dispatch_res.enums.items()):
+            mod_name = camel_to_snake(name)
+            filename = f"{mod_name}.rs"
+            print(f"\n📘 {name}")
+
+            template_code = self.generator.generate_enum(enum_obj)
+            template_res = self.validator.validate_single(
+                filename, template_code, test_env_files
+            )
+
+            if template_res.passed:
+                generated_files[filename] = template_code
+                test_env_files[filename] = template_code
+                mod_entities.append((name, mod_name))
+                print("   ✅ template passed")
+                continue
+
+            print(
+                f"   ⚠️ template error: "
+                f"{template_res.error_message}"
+            )
+
+            raw_go = self._build_raw_go_enum(enum_obj)
+            success, repaired, info = self.llm_generator.repair(
+                entity_name=name,
+                raw_go_code=raw_go,
+                template_rust_code=template_code,
+                initial_error=template_res.error_message or "Unknown error",
+                validator=self.validator,
+                test_env_files=test_env_files,
+                filename=filename,
+            )
+
+            if success and repaired:
+                generated_files[filename] = repaired
+                test_env_files[filename] = repaired
+                mod_entities.append((name, mod_name))
+                print(f"   ✅ llm repair passed ({info})")
+            else:
+                failed_entities.append({
+                    "name": name,
+                    "kind": "enum",
+                    "error": info,
+                })
+                print(f"   ❌ failed: {info}")
+
+        # ============================================================
+        # 3. STRUCTS — МНОГОПРОХОДНАЯ ШАБЛОННАЯ ГЕНЕРАЦИЯ
+        # ============================================================
+        print(f"\n── Structs ({len(dispatch_res.structs)}) ──")
+
+        pending_structs = dict(sorted(dispatch_res.structs.items()))
+        postponed_structs: dict[str, object] = {}
+
+        wave = 1
+        while pending_structs:
+            print(f"\n🔁 Struct generation wave #{wave}")
+            progress_made = False
+            postponed_structs.clear()
+
+            for name, struct_obj in pending_structs.items():
                 mod_name = camel_to_snake(name)
+                filename = f"{mod_name}.rs"
+                print(f"\n📗 {name}")
 
-                if name not in LLM_TEST_WHITELIST:
-                    print(f"⏭️  {name}: fallback -> template")
-                    generated_files[f"{mod_name}.rs"] = self.generator.generate_struct(struct_obj)
-                    mod_entities.append((name, mod_name))
-                    llm_fallback += 1
-                    continue
-
-                print(f"\n🧠 LLM обрабатывает структуру: {name}")
-                raw_go_code = self._build_raw_go_struct(struct_obj)
-
-                success, rust_code, info = llm_generator.generate(
-                    go_struct=struct_obj,
-                    validator=self.validator,
-                    test_env_files={},
-                    raw_go_code=raw_go_code,
+                template_code = self.generator.generate_struct(struct_obj)
+                template_res = self.validator.validate_single(
+                    filename, template_code, test_env_files
                 )
 
-                if success and rust_code:
-                    generated_files[f"{mod_name}.rs"] = rust_code
+                if template_res.passed:
+                    generated_files[filename] = template_code
+                    test_env_files[filename] = template_code
                     mod_entities.append((name, mod_name))
-                    llm_success += 1
-                    print(f"✅ {name}: {info}")
+                    progress_made = True
+                    print("   ✅ template passed")
                 else:
-                    print(f"❌ {name}: ошибка LLM -> fallback в template ({info})")
-                    generated_files[f"{mod_name}.rs"] = self.generator.generate_struct(struct_obj)
-                    mod_entities.append((name, mod_name))
-                    llm_failed += 1
+                    error_text = template_res.error_message or ""
+                    print(f"   ⚠️ template error: {error_text}")
 
-        # mod.rs должен быть сгенерирован ДО финальной валидации
+                    if self._is_missing_dependency_error(error_text):
+                        print(
+                            "   ⏳ dependency not ready yet, "
+                            "postponing to next wave"
+                        )
+                        postponed_structs[name] = struct_obj
+                    else:
+                        postponed_structs[name] = struct_obj
+
+            if progress_made:
+                pending_structs = dict(postponed_structs)
+                wave += 1
+                continue
+
+            # Если в этой волне не было прогресса —
+            # дальше шаблон уже не поможет, переходим к LLM repair
+            break
+
+        # ============================================================
+        # 4. LLM REPAIR для оставшихся struct
+        # ============================================================
+        if postponed_structs:
+            print(
+                f"\n🤖 Running LLM repair for remaining "
+                f"{len(postponed_structs)} struct(s)..."
+            )
+
+        for name, struct_obj in postponed_structs.items():
+            mod_name = camel_to_snake(name)
+            filename = f"{mod_name}.rs"
+            print(f"\n📗 {name}")
+
+            template_code = self.generator.generate_struct(struct_obj)
+            template_res = self.validator.validate_single(
+                filename, template_code, test_env_files
+            )
+
+            raw_go = self._build_raw_go_struct(struct_obj)
+            success, repaired, info = self.llm_generator.repair(
+                entity_name=name,
+                raw_go_code=raw_go,
+                template_rust_code=template_code,
+                initial_error=template_res.error_message or "Unknown error",
+                validator=self.validator,
+                test_env_files=test_env_files,
+                filename=filename,
+            )
+
+            if success and repaired:
+                generated_files[filename] = repaired
+                test_env_files[filename] = repaired
+                mod_entities.append((name, mod_name))
+                print(f"   ✅ llm repair passed ({info})")
+            else:
+                failed_entities.append({
+                    "name": name,
+                    "kind": "struct",
+                    "error": info,
+                })
+                print(f"   ❌ failed: {info}")
+
+        # ============================================================
+        # 5. Если есть провалы — уведомление и остановка
+        # ============================================================
+        if failed_entities:
+            print(
+                "\n❌ Есть сущности, которые не удалось "
+                "синхронизировать:"
+            )
+            for item in failed_entities:
+                print(
+                    f"   ✗ {item['name']} "
+                    f"({item['kind']}): {item['error']}"
+                )
+            self._notify_engineer(failed_entities)
+            return False
+
+        # ============================================================
+        # 6. mod.rs
+        # ============================================================
         mod_content = self.generator.generate_mod_file(mod_entities)
         generated_files["mod.rs"] = mod_content
 
+        # ============================================================
+        # 7. Финальная валидация
+        # ============================================================
         print("\n──────── Generation Report ────────")
         print(
-            f"Total entities parsed:         "
+            f"Entities parsed:  "
             f"{parsed_struct_count + parsed_enum_count + parsed_alias_count}"
         )
-        print(f"Structs parsed:                {parsed_struct_count}")
-        print(f"Enums parsed:                  {parsed_enum_count}")
-        print(f"Aliases parsed:                {parsed_alias_count}")
+        print(f"Structs:          {parsed_struct_count}")
+        print(f"Enums:            {parsed_enum_count}")
+        print(f"Aliases:          {parsed_alias_count}")
         if PROTOTYPE_MODE:
-            print(f"Structs kept in prototype:     {len(structs)}")
-            print(f"Enums kept in prototype:       {len(enums)}")
-            print(f"Aliases kept in prototype:     {len(aliases)}")
-        print(f"Structs generated (template):  {len(dispatch_res.template_structs)}")
-        print(f"Structs marked as llm:         {len(dispatch_res.llm_structs)}")
-        print(f"LLM success:                   {llm_success}")
-        print(f"LLM failed -> template:        {llm_failed}")
-        print(f"LLM skipped -> template:       {llm_fallback}")
-        print(f"Enums generated:               {len(dispatch_res.template_enums)}")
-        print(f"Aliases generated:             {len(dispatch_res.template_aliases)}")
-        print(f"Manual types skipped:          {len(MANUAL_TYPES)}")
-        print(f"Output dir: {self.config.output_dir}")
+            print(
+                f"After prototype filter: "
+                f"{len(structs)} structs, "
+                f"{len(enums)} enums, "
+                f"{len(aliases)} aliases"
+            )
+        print(f"Generated:        {len(mod_entities)}")
+        print(f"Failed:           {len(failed_entities)}")
+        print(f"Output dir:       {self.config.output_dir}")
         print("───────────────────────────────────\n")
 
-        print("🛠️  Validating all generated files...")
+        print("🛠️  Final validation...")
         val_result = self.validator.validate_all(generated_files)
 
         if val_result.passed:
-            print(f"✅ Validation passed! Saving {len(generated_files)} files...")
-
-            self.config.output_dir.mkdir(parents=True, exist_ok=True)
+            print(
+                f"✅ Validation passed! "
+                f"Saving {len(generated_files)} files..."
+            )
+            self.config.output_dir.mkdir(
+                parents=True, exist_ok=True
+            )
 
             for old_file in self.config.output_dir.glob("*.rs"):
                 old_file.unlink()
 
             for name, content in generated_files.items():
-                (self.config.output_dir / name).write_text(content, encoding="utf-8")
+                (self.config.output_dir / name).write_text(
+                    content, encoding="utf-8"
+                )
 
-            print("📦 Generated mod.rs")
             print("🚀 All done successfully!")
             return True
         else:
-            print("❌ Validation failed! Files were NOT saved.")
-            print(f"💡 Причина: {val_result.error_message}")
+            print("❌ Final validation failed!")
+            print(f"   Причина: {val_result.error_message}")
+            self._notify_engineer([{
+                "name": "final_validation",
+                "kind": "pipeline",
+                "error": val_result.error_message or "Unknown",
+            }])
             return False
 
-    def _filter_structs_for_prototype(self, structs: dict[str, object]) -> dict[str, object]:
-        if not PROTOTYPE_STRUCT_WHITELIST:
-            return structs
+    def _is_missing_dependency_error(self, error_text: str) -> bool:
+        """
+        Возвращает True, если ошибка шаблонной генерации
+        вызвана тем, что зависимый тип ещё не был сгенерирован
+        и не попал в support_files.
+        """
+        markers = [
+            "no `",
+            "not found in `crate::incus`",
+            "cannot find type",
+            "unresolved import `crate::incus::",
+        ]
+        return any(marker in error_text for marker in markers)
 
-        return {
-            name: obj
-            for name, obj in structs.items()
-            if name in PROTOTYPE_STRUCT_WHITELIST
-        }
+    def _notify_engineer(self, failed_entities: list[dict]) -> None:
+        changes_file = Path("state/changes.json")
+        changed_files = []
+        commit_sha = None
 
-    def _filter_support_types_for_prototype(
-        self,
-        enums: dict[str, object],
-        aliases: dict[str, object],
-        structs: dict[str, object],
-    ) -> tuple[dict[str, object], dict[str, object]]:
-        direct_refs = self._collect_referenced_type_names_from_structs(structs)
+        if changes_file.exists():
+            try:
+                changes = json.loads(
+                    changes_file.read_text(encoding="utf-8")
+                )
+                commit_sha = changes.get("last_sha")
+                changed_files = [
+                    f["path"]
+                    for f in changes
+                    .get("api_changes", {})
+                    .get("files", [])
+                ]
+            except Exception as e:
+                print(
+                    f"⚠️ Не удалось прочитать "
+                    f"state/changes.json: {e}"
+                )
 
-        kept_enums = set(PROTOTYPE_ENUM_WHITELIST) | (set(enums.keys()) & direct_refs)
-        kept_aliases = set(PROTOTYPE_ALIAS_WHITELIST) | (set(aliases.keys()) & direct_refs)
-
-        changed = True
-        while changed:
-            changed = False
-
-            for alias_name in list(kept_aliases):
-                alias_obj = aliases.get(alias_name)
-                if not alias_obj:
-                    continue
-
-                nested_tokens = self._extract_type_tokens(alias_obj.target_type)
-                for token in nested_tokens:
-                    if token in aliases and token not in kept_aliases:
-                        kept_aliases.add(token)
-                        changed = True
-                    if token in enums and token not in kept_enums:
-                        kept_enums.add(token)
-                        changed = True
-
-        filtered_enums = {
-            name: obj
-            for name, obj in enums.items()
-            if name in kept_enums
-        }
-
-        filtered_aliases = {
-            name: obj
-            for name, obj in aliases.items()
-            if name in kept_aliases
-        }
-
-        return filtered_enums, filtered_aliases
-
-    def _collect_referenced_type_names_from_structs(self, structs: dict[str, object]) -> set[str]:
-        refs = set()
-
-        for struct_obj in structs.values():
-            for field in struct_obj.fields:
-                refs.update(self._extract_type_tokens(field.go_type))
-
-        return refs
-
-    def _extract_type_tokens(self, go_type: str) -> set[str]:
-        return set(re.findall(r"\b[A-Z][A-Za-z0-9_]*\b", go_type))
+        print(
+            "\n⚠️ Уведомляем инженера о невозможности "
+            "синхронизации..."
+        )
+        try:
+            notifier = EmailNotifier()
+            notifier.send_sync_failure_notification(
+                failed_entities=failed_entities,
+                changed_files=changed_files,
+                commit_sha=commit_sha,
+            )
+        except EmailNotifierError as e:
+            print(f"⚠️ Email не отправлен: {e}")
+            print("   Детали провала:")
+            for item in failed_entities:
+                print(
+                    f"   ✗ {item['name']} "
+                    f"({item['kind']}): {item['error']}"
+                )
 
     def _build_raw_go_struct(self, struct_obj) -> str:
         lines = [f"type {struct_obj.name} struct {{"]
 
+        for emb in getattr(struct_obj, "embedded", []):
+            lines.append(f'    {emb} `yaml:",inline"`')
+
         for field in struct_obj.fields:
             tag_parts = []
-
             if field.tag.json_name is not None:
                 json_tag = field.tag.json_name
                 if field.tag.omitempty:
                     json_tag += ",omitempty"
                 tag_parts.append(f'json:"{json_tag}"')
-
             if field.tag.inline:
                 tag_parts.append('yaml:",inline"')
-
-            if tag_parts:
-                tag_str = " `" + " ".join(tag_parts) + "`"
-            else:
-                tag_str = ""
-
-            lines.append(f"    {field.name} {field.go_type}{tag_str}")
+            tag_str = (
+                " `" + " ".join(tag_parts) + "`"
+                if tag_parts
+                else ""
+            )
+            lines.append(
+                f"    {field.name} {field.go_type}{tag_str}"
+            )
 
         lines.append("}")
         return "\n".join(lines)
+
+    def _build_raw_go_enum(self, enum_obj) -> str:
+        lines = [
+            f"type {enum_obj.name} {enum_obj.base_type}",
+            "",
+            "const (",
+        ]
+        for name, value in enum_obj.values:
+            lines.append(
+                f"    {name} {enum_obj.name} = {value}"
+            )
+        lines.append(")")
+        return "\n".join(lines)
+
+    def _build_raw_go_alias(self, alias_obj) -> str:
+        return f"type {alias_obj.name} {alias_obj.target_type}"
