@@ -16,6 +16,17 @@ steps:
       - go build -o parser main.go
       - echo "✅ Go AST parser built"
 
+  - name: debug-secrets
+    image: alpine:3.20
+    environment:
+      GITHUB_TOKEN:
+        from_secret: github_token
+      INCUS_SOURCE_REPO:
+        from_secret: incus_source_repo
+    commands:
+      - echo "TOKEN length: ${#GITHUB_TOKEN}"
+      - echo "SOURCE REPO: ${INCUS_SOURCE_REPO}"
+
   # ------------------------------------------------------------
   # 2. Клонирование Incus source repo
   # ------------------------------------------------------------
