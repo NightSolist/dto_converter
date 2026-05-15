@@ -17,24 +17,7 @@ steps:
       - echo "✅ Go AST parser built"
 
   # ------------------------------------------------------------
-  # 2. Клонирование Incus source repo
-  # ------------------------------------------------------------
-  - name: clone-incus-source
-    image: alpine/git
-    environment:
-      GITHUB_TOKEN:
-        from_secret: github_token
-      INCUS_SOURCE_REPO:
-        from_secret: incus_source_repo
-    commands:
-      - rm -rf incus-src
-      - 'git clone "https://x-access-token:$${GITHUB_TOKEN}@github.com/$${INCUS_SOURCE_REPO}.git" incus-src'
-      - echo "✅ Incus source repo cloned"
-    depends_on:
-      - build-parser
-
-  # ------------------------------------------------------------
-  # 3. Мониторинг изменений
+  # 2. Мониторинг изменений (без клонирования Incus)
   # ------------------------------------------------------------
   - name: monitor-changes
     image: python:3.12-slim
@@ -43,7 +26,8 @@ steps:
         from_secret: github_token
       INCUS_SOURCE_REPO:
         from_secret: incus_source_repo
-      SYNC_STATE_FILE: /ci-state/incus-sync/.sync_state
+    volumes:
+      - /home/dev/woodpecker-state:/ci-state
     commands:
       - pip install --quiet PyGithub==2.5.0
       - mkdir -p state
@@ -53,32 +37,82 @@ steps:
         import json, os
         from pathlib import Path
         from src.monitor import run_monitor
-        res = run_monitor(repo_name=os.environ['INCUS_SOURCE_REPO'], state_file=Path(os.environ['SYNC_STATE_FILE']), output_file=Path('state/changes.json'))
+        res = run_monitor(
+            repo_name=os.environ['INCUS_SOURCE_REPO'],
+            state_file=Path('/ci-state/incus-sync/.sync_state'),
+            output_file=Path('state/changes.json'),
+        )
         print(json.dumps(res, indent=2, ensure_ascii=False))
-        with open(os.environ.get('CI_ENV_FILE', '/dev/null'), 'a', encoding='utf-8') as f:
-            if res.get('no_changes'):
-                f.write('NO_CHANGES=true\n')
-            else:
-                f.write('NO_CHANGES=false\n')
-                f.write(f\"INCUS_SHA={res.get('last_sha', '')}\n\")
-                f.write(f\"API_CHANGED_COUNT={len(res.get('api_changes', {}).get('files', []))}\n\")
-                f.write(f\"CLIENT_CHANGED_COUNT={len(res.get('client_changes', {}).get('files', []))}\n\")
+
+        Path('state').mkdir(exist_ok=True)
+        if res.get('no_changes'):
+            Path('state/.no_changes').write_text('true')
+            print('NO_CHANGES detected')
+        else:
+            Path('state/.no_changes').write_text('false')
+            Path('state/.incus_sha').write_text(res.get('last_sha', ''))
+            api_count = len(res.get('api_changes', {}).get('files', []))
+            client_count = len(res.get('client_changes', {}).get('files', []))
+            Path('state/.api_changed_count').write_text(str(api_count))
+            Path('state/.client_changed_count').write_text(str(client_count))
+            print(f'Changes detected: API={api_count}, client={client_count}')
         "
       - echo "✅ Monitoring finished"
     depends_on:
-      - clone-incus-source
+      - build-parser
 
   # ------------------------------------------------------------
-  # 4. Генерация DTO и валидация генератора
+  # 3. Клонирование/обновление Incus source repo (shallow + cache)
+  # ------------------------------------------------------------
+  - name: clone-incus-source
+    image: alpine/git
+    environment:
+      GITHUB_TOKEN:
+        from_secret: github_token
+      INCUS_SOURCE_REPO:
+        from_secret: incus_source_repo
+    volumes:
+      - /home/dev/woodpecker-state:/ci-state
+    commands:
+      - |
+        if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
+          echo "⏭️  No changes detected, skipping Incus clone"
+          exit 0
+        fi
+      - mkdir -p /ci-state/incus-src
+      - cd /ci-state/incus-src
+      - |
+        if [ -d ".git" ]; then
+          echo "📦 Incus repo cache found, updating..."
+          git fetch --depth=1 origin HEAD
+          git reset --hard FETCH_HEAD
+          git clean -fd
+        else
+          echo "📦 First clone of Incus repo (shallow)..."
+          git clone --depth=1 "https://x-access-token:$${GITHUB_TOKEN}@github.com/$${INCUS_SOURCE_REPO}.git" .
+        fi
+      - echo "✅ Incus source repo ready"
+    depends_on:
+      - monitor-changes
+
+  # ------------------------------------------------------------
+  # 4. Генерация DTO
   # ------------------------------------------------------------
   - name: generate-models
     image: rust:1.83
     environment:
-      INCUS_REPO_PATH: /woodpecker/src/github.com/NightSolist/dto_converter/incus-src
+      INCUS_REPO_PATH: /ci-state/incus-src
       OUTPUT_DIR: /woodpecker/src/github.com/NightSolist/dto_converter/generated_output
       OLLAMA_URL:
         from_secret: ollama_url
+    volumes:
+      - /home/dev/woodpecker-state:/ci-state
     commands:
+      - |
+        if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
+          echo "⏭️  No changes detected, skipping generation"
+          exit 0
+        fi
       - apt-get update -qq
       - apt-get install -y -qq python3 python3-pip
       - pip3 install --quiet --break-system-packages requests==2.32.3 Jinja2==3.1.4
@@ -94,11 +128,9 @@ steps:
       - |
         count=$$(find generated_output -maxdepth 1 -name "*.rs" | wc -l)
         echo "Generated files: $${count}"
-        echo "GENERATED_COUNT=$${count}" >> "$${CI_ENV_FILE}"
-    when:
-      evaluate: 'NO_CHANGES != "true"'
+        echo "$${count}" > state/.generated_count
     depends_on:
-      - monitor-changes
+      - clone-incus-source
 
   # ------------------------------------------------------------
   # 5. Клонирование целевого Rust-репозитория
@@ -111,11 +143,14 @@ steps:
       RUST_TARGET_REPO:
         from_secret: rust_target_repo
     commands:
+      - |
+        if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
+          echo "⏭️  No changes detected, skipping Rust target clone"
+          exit 0
+        fi
       - rm -rf target-rust
-      - 'git clone "https://x-access-token:$${GITHUB_TOKEN}@github.com/$${RUST_TARGET_REPO}.git" target-rust'
+      - 'git clone --depth=1 "https://x-access-token:$${GITHUB_TOKEN}@github.com/$${RUST_TARGET_REPO}.git" target-rust'
       - echo "✅ Rust target repo cloned"
-    when:
-      evaluate: 'NO_CHANGES != "true"'
     depends_on:
       - generate-models
 
@@ -125,11 +160,14 @@ steps:
   - name: inject-generated
     image: alpine:latest
     commands:
+      - |
+        if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
+          echo "⏭️  No changes detected, skipping inject"
+          exit 0
+        fi
       - rm -rf target-rust/src/incus/generated_prototype/*.rs
       - cp generated_output/*.rs target-rust/src/incus/generated_prototype/
       - echo "✅ Generated files copied into Rust target repo"
-    when:
-      evaluate: 'NO_CHANGES != "true"'
     depends_on:
       - clone-rust-target
 
@@ -139,13 +177,16 @@ steps:
   - name: rustfmt
     image: rust:1.83
     commands:
+      - |
+        if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
+          echo "⏭️  No changes detected, skipping rustfmt"
+          exit 0
+        fi
       - rustup component add rustfmt
       - cd target-rust
       - cargo fmt --all
       - echo "✅ Rust code formatted"
       - cp src/incus/generated_prototype/*.rs ../generated_output/
-    when:
-      evaluate: 'NO_CHANGES != "true"'
     depends_on:
       - inject-generated
 
@@ -155,11 +196,14 @@ steps:
   - name: cargo-check
     image: rust:1.83
     commands:
+      - |
+        if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
+          echo "⏭️  No changes detected, skipping cargo check"
+          exit 0
+        fi
       - cd target-rust
       - cargo check --all-targets
       - echo "✅ cargo check passed"
-    when:
-      evaluate: 'NO_CHANGES != "true"'
     depends_on:
       - rustfmt
 
@@ -169,11 +213,14 @@ steps:
   - name: cargo-test-serde
     image: rust:1.83
     commands:
+      - |
+        if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
+          echo "⏭️  No changes detected, skipping serde tests"
+          exit 0
+        fi
       - cd target-rust
       - cargo test --test serde_dto -- --nocapture
       - echo "✅ serde DTO tests passed"
-    when:
-      evaluate: 'NO_CHANGES != "true"'
     depends_on:
       - cargo-check
 
@@ -188,6 +235,11 @@ steps:
       RUST_TARGET_REPO:
         from_secret: rust_target_repo
     commands:
+      - |
+        if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
+          echo "⏭️  No changes detected, skipping PR publication"
+          exit 0
+        fi
       - pip install --quiet PyGithub==2.5.0
       - |
         python -c "
@@ -195,14 +247,14 @@ steps:
         from pathlib import Path
         from src.github_publisher import GitHubPublisher
         pub = GitHubPublisher(repo_name=os.environ['RUST_TARGET_REPO'])
-        url = pub.publish(generated_dir=Path('generated_output'), target_path='src/incus/generated_prototype')
-        with open(os.environ.get('CI_ENV_FILE', '/dev/null'), 'a', encoding='utf-8') as f:
-            f.write(f'PR_URL={url}\\n')
+        url = pub.publish(
+            generated_dir=Path('generated_output'),
+            target_path='src/incus/generated_prototype',
+        )
+        Path('state/.pr_url').write_text(url)
         print(f'PR created: {url}')
         "
       - echo "✅ Pull Request published"
-    when:
-      evaluate: 'NO_CHANGES != "true"'
     depends_on:
       - cargo-test-serde
 
@@ -211,22 +263,25 @@ steps:
   # ------------------------------------------------------------
   - name: update-state
     image: python:3.12-slim
-    environment:
-      SYNC_STATE_FILE: /ci-state/incus-sync/.sync_state
+    volumes:
+      - /home/dev/woodpecker-state:/ci-state
     commands:
       - |
+        if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
+          echo "⏭️  No changes detected, skipping state update"
+          exit 0
+        fi
+      - |
         python -c "
-        import json, os
+        import json
         from pathlib import Path
         from src.monitor import save_state
         sha = json.loads(Path('state/changes.json').read_text(encoding='utf-8')).get('last_sha')
         if sha:
-            save_state(sha, Path(os.environ['SYNC_STATE_FILE']))
+            save_state(sha, Path('/ci-state/incus-sync/.sync_state'))
             print(f'State updated: {sha}')
         "
       - echo "✅ Sync state updated"
-    when:
-      evaluate: 'NO_CHANGES != "true"'
     depends_on:
       - publish-pr
 
@@ -253,17 +308,25 @@ steps:
         Pipeline Incus Model Sync успешно завершён.
 
         Сводка:
-          • Коммит Incus: ${INCUS_SHA}
-          • Изменённых API-файлов: ${API_CHANGED_COUNT}
-          • Сгенерировано Rust-файлов: ${GENERATED_COUNT}
-          • Pull Request: ${PR_URL}
+          • Репозиторий генератора: ${CI_REPO}
           • Pipeline: ${CI_PIPELINE_URL}
+          • Подробности: смотрите файлы в state/ workspace pipeline.
+
+        Что было выполнено:
+          • Мониторинг изменений Incus
+          • Парсинг Go-структур через AST
+          • Шаблонная генерация DTO (template-first)
+          • LLM repair (если потребовалось)
+          • Форматирование cargo fmt
+          • Компиляционная проверка cargo check
+          • Unit-тесты DTO (serde_dto)
+          • Создание Pull Request
+          • Обновление .sync_state
 
         —
         Incus Sync Bot
     when:
       - status: success
-        evaluate: 'NO_CHANGES != "true"'
     depends_on:
       - update-state
 
@@ -290,9 +353,16 @@ steps:
         Pipeline Incus Model Sync завершился с ошибкой.
 
         Сводка:
-          • Коммит Incus: ${INCUS_SHA}
+          • Репозиторий генератора: ${CI_REPO}
           • Pipeline: ${CI_PIPELINE_URL}
-          • PR (если успел): ${PR_URL}
+
+        Возможные этапы отказа:
+          • Мониторинг изменений
+          • Клонирование Incus
+          • Генерация DTO
+          • LLM repair
+          • Rustfmt / cargo check / serde_dto
+          • Публикация PR
 
         Требуется анализ логов pipeline.
 
