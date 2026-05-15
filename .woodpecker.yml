@@ -9,6 +9,13 @@ steps:
   # ------------------------------------------------------------
   # 1. Сборка Go AST parser
   # ------------------------------------------------------------
+  - name: build-parser
+    image: golang:1.22
+    commands:
+      - cd src/go-ast-parser
+      - go build -o parser main.go
+      - echo "✅ Go AST parser built"
+
   - name: debug-secrets
     image: alpine:3.20
     environment:
