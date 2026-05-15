@@ -17,7 +17,7 @@ steps:
       - echo "✅ Go AST parser built"
 
   - name: debug-secrets
-    image: alpine:3.20
+    image: alpine:latest
     environment:
       GITHUB_TOKEN:
         from_secret: github_token
@@ -34,7 +34,7 @@ steps:
   # 2. Клонирование Incus source repo
   # ------------------------------------------------------------
   - name: clone-incus-source
-    image: alpine/git
+    image: alpine:latest
     environment:
       GITHUB_TOKEN:
         from_secret: github_token
@@ -117,7 +117,7 @@ steps:
   # 5. Клонирование целевого Rust-репозитория
   # ------------------------------------------------------------
   - name: clone-rust-target
-    image: alpine/git
+    image: alpine:latest
     environment:
       GITHUB_TOKEN:
         from_secret: github_token
@@ -136,7 +136,7 @@ steps:
   # 6. Подмена generated_prototype в целевом Rust-репозитории
   # ------------------------------------------------------------
   - name: inject-generated
-    image: alpine:3.20
+    image: alpine:latest
     commands:
       - rm -rf target-rust/src/incus/generated_prototype/*.rs
       - cp generated_output/*.rs target-rust/src/incus/generated_prototype/
