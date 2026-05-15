@@ -25,11 +25,12 @@ steps:
       INCUS_SOURCE_REPO:
         from_secret: incus_source_repo
     commands:
-      - echo "=== HARDCODED ==="
-      - 'echo "Hardcoded value: ${HARDCODED}"'
-      - echo "=== ENV DUMP ==="
-      - env | sort
-      - echo "=== END ==="
+      - 'echo "Hardcoded value: $${HARDCODED}"'
+      - 'echo "Token length: $${#GITHUB_TOKEN}"'
+      - 'echo "Repo: [$${INCUS_SOURCE_REPO}]"'
+      - 'echo "First 4 chars: $${GITHUB_TOKEN:0:4}"'
+    depends_on:
+      - build-parser
 
   # ------------------------------------------------------------
   # 2. Клонирование Incus source repo
