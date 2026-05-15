@@ -16,22 +16,6 @@ steps:
       - go build -o parser main.go
       - echo "✅ Go AST parser built"
 
-  - name: debug-secrets
-    image: alpine:latest
-    environment:
-      HARDCODED: "hello-yaml"
-      GITHUB_TOKEN:
-        from_secret: github_token
-      INCUS_SOURCE_REPO:
-        from_secret: incus_source_repo
-    commands:
-      - 'echo "Hardcoded value: $${HARDCODED}"'
-      - 'echo "Token length: $${#GITHUB_TOKEN}"'
-      - 'echo "Repo: [$${INCUS_SOURCE_REPO}]"'
-      - 'echo "First 4 chars: $${GITHUB_TOKEN:0:4}"'
-    depends_on:
-      - build-parser
-
   # ------------------------------------------------------------
   # 2. Клонирование Incus source repo
   # ------------------------------------------------------------
@@ -44,7 +28,7 @@ steps:
         from_secret: incus_source_repo
     commands:
       - rm -rf incus-src
-      - git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/${INCUS_SOURCE_REPO}.git" incus-src
+      - 'git clone "https://x-access-token:$${GITHUB_TOKEN}@github.com/$${INCUS_SOURCE_REPO}.git" incus-src'
       - echo "✅ Incus source repo cloned"
     depends_on:
       - build-parser
@@ -90,8 +74,8 @@ steps:
   - name: generate-models
     image: rust:1.83
     environment:
-      INCUS_REPO_PATH: /woodpecker/src/incus-src
-      OUTPUT_DIR: /woodpecker/src/generated_output
+      INCUS_REPO_PATH: /woodpecker/src/github.com/NightSolist/dto_converter/incus-src
+      OUTPUT_DIR: /woodpecker/src/github.com/NightSolist/dto_converter/generated_output
       OLLAMA_URL:
         from_secret: ollama_url
     commands:
@@ -108,8 +92,9 @@ steps:
         "
       - echo "✅ DTO generation completed"
       - |
-        count=$(find generated_output -maxdepth 1 -name "*.rs" | wc -l)
-        echo "GENERATED_COUNT=${count}" >> "${CI_ENV_FILE}"
+        count=$$(find generated_output -maxdepth 1 -name "*.rs" | wc -l)
+        echo "Generated files: $${count}"
+        echo "GENERATED_COUNT=$${count}" >> "$${CI_ENV_FILE}"
     when:
       evaluate: 'NO_CHANGES != "true"'
     depends_on:
@@ -127,7 +112,7 @@ steps:
         from_secret: rust_target_repo
     commands:
       - rm -rf target-rust
-      - git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/${RUST_TARGET_REPO}.git" target-rust
+      - 'git clone "https://x-access-token:$${GITHUB_TOKEN}@github.com/$${RUST_TARGET_REPO}.git" target-rust'
       - echo "✅ Rust target repo cloned"
     when:
       evaluate: 'NO_CHANGES != "true"'
@@ -138,7 +123,7 @@ steps:
   # 6. Подмена generated_prototype в целевом Rust-репозитории
   # ------------------------------------------------------------
   - name: inject-generated
-    image: alpine:3.20
+    image: alpine:latest
     commands:
       - rm -rf target-rust/src/incus/generated_prototype/*.rs
       - cp generated_output/*.rs target-rust/src/incus/generated_prototype/
