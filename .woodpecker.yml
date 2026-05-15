@@ -1,47 +1,342 @@
 when:
-  - event: push
+  - event: cron
+    cron: sync-incus
   - event: manual
+  - event: push
+    branch: main
 
 steps:
   # ------------------------------------------------------------
-  # 1. Проверка компиляции
+  # 1. Сборка Go AST parser
+  # ------------------------------------------------------------
+  - name: build-parser
+    image: golang:1.22
+    commands:
+      - cd src/go-ast-parser
+      - go build -o parser main.go
+      - echo "✅ Go AST parser built"
+
+  # ------------------------------------------------------------
+  # 2. Клонирование Incus source repo
+  # ------------------------------------------------------------
+  - name: clone-incus-source
+    image: alpine/git
+    environment:
+      GITHUB_TOKEN:
+        from_secret: github_token
+      INCUS_SOURCE_REPO:
+        from_secret: incus_source_repo
+    commands:
+      - rm -rf incus-src
+      - git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/${INCUS_SOURCE_REPO}.git" incus-src
+      - echo "✅ Incus source repo cloned"
+    depends_on:
+      - build-parser
+
+  # ------------------------------------------------------------
+  # 3. Мониторинг изменений
+  # ------------------------------------------------------------
+  - name: monitor-changes
+    image: python:3.12-slim
+    environment:
+      GITHUB_TOKEN:
+        from_secret: github_token
+      INCUS_SOURCE_REPO:
+        from_secret: incus_source_repo
+      SYNC_STATE_FILE: /ci-state/incus-sync/.sync_state
+    commands:
+      - pip install --quiet PyGithub==2.5.0
+      - mkdir -p state
+      - mkdir -p /ci-state/incus-sync
+      - |
+        python - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+        from src.monitor import run_monitor
+
+        state_file = Path(os.environ["SYNC_STATE_FILE"])
+        output_file = Path("state/changes.json")
+
+        result = run_monitor(
+            repo_name=os.environ["INCUS_SOURCE_REPO"],
+            state_file=state_file,
+            output_file=output_file,
+        )
+
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+        env_file = os.environ.get("CI_ENV_FILE", "/dev/null")
+        with open(env_file, "a", encoding="utf-8") as f:
+            if result.get("no_changes"):
+                f.write("NO_CHANGES=true\n")
+            else:
+                f.write("NO_CHANGES=false\n")
+                last_sha = result.get("last_sha", "")
+                f.write(f"INCUS_SHA={last_sha}\n")
+
+                api_files = result.get("api_changes", {}).get("files", [])
+                client_files = result.get("client_changes", {}).get("files", [])
+
+                f.write(f"API_CHANGED_COUNT={len(api_files)}\n")
+                f.write(f"CLIENT_CHANGED_COUNT={len(client_files)}\n")
+        PY
+      - echo "✅ Monitoring finished"
+    depends_on:
+      - clone-incus-source
+
+  # ------------------------------------------------------------
+  # 4. Генерация DTO и валидация генератора
+  # ------------------------------------------------------------
+  - name: generate-models
+    image: rust:1.83
+    environment:
+      INCUS_REPO_PATH: /woodpecker/src/incus-src
+      OUTPUT_DIR: /woodpecker/src/generated_output
+      OLLAMA_URL:
+        from_secret: ollama_url
+    commands:
+      - apt-get update -qq
+      - apt-get install -y -qq python3 python3-pip
+      - pip3 install --quiet --break-system-packages requests==2.32.3 Jinja2==3.1.4
+      - rm -rf generated_output
+      - mkdir -p generated_output
+      - python3 - <<'PY'
+        from src.pipeline import Pipeline
+
+        pipeline = Pipeline()
+        success = pipeline.run()
+
+        if not success:
+            raise SystemExit(1)
+        PY
+      - echo "✅ DTO generation completed"
+      - |
+        count=$(find generated_output -maxdepth 1 -name "*.rs" | wc -l)
+        echo "Generated files: ${count}"
+        echo "GENERATED_COUNT=${count}" >> "${CI_ENV_FILE}"
+    when:
+      evaluate: 'NO_CHANGES != "true"'
+    depends_on:
+      - monitor-changes
+
+  # ------------------------------------------------------------
+  # 5. Клонирование целевого Rust-репозитория
+  # ------------------------------------------------------------
+  - name: clone-rust-target
+    image: alpine/git
+    environment:
+      GITHUB_TOKEN:
+        from_secret: github_token
+      RUST_TARGET_REPO:
+        from_secret: rust_target_repo
+    commands:
+      - rm -rf target-rust
+      - git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/${RUST_TARGET_REPO}.git" target-rust
+      - echo "✅ Rust target repo cloned"
+    when:
+      evaluate: 'NO_CHANGES != "true"'
+    depends_on:
+      - generate-models
+
+  # ------------------------------------------------------------
+  # 6. Подмена generated_prototype в целевом Rust-репозитории
+  # ------------------------------------------------------------
+  - name: inject-generated
+    image: alpine:3.20
+    commands:
+      - rm -rf target-rust/src/incus/generated_prototype/*.rs
+      - cp generated_output/*.rs target-rust/src/incus/generated_prototype/
+      - echo "✅ Generated files copied into Rust target repo"
+    when:
+      evaluate: 'NO_CHANGES != "true"'
+    depends_on:
+      - clone-rust-target
+
+  # ------------------------------------------------------------
+  # 7. Форматирование Rust-кода
+  # ------------------------------------------------------------
+  - name: rustfmt
+    image: rust:1.83
+    commands:
+      - rustup component add rustfmt
+      - cd target-rust
+      - cargo fmt --all
+      - echo "✅ Rust code formatted"
+      # копируем отформатированные файлы обратно, чтобы PR содержал уже rustfmt-версию
+      - cp src/incus/generated_prototype/*.rs ../generated_output/
+    when:
+      evaluate: 'NO_CHANGES != "true"'
+    depends_on:
+      - inject-generated
+
+  # ------------------------------------------------------------
+  # 8. Компиляционная проверка Rust-репозитория
   # ------------------------------------------------------------
   - name: cargo-check
     image: rust:1.83
     commands:
-      - rustc --version
-      - cargo --version
-      - echo "▶ Compile-time validation of generated Incus DTO..."
+      - cd target-rust
       - cargo check --all-targets
       - echo "✅ cargo check passed"
-
-  # ------------------------------------------------------------
-  # 2. Проверка форматирования
-  # ------------------------------------------------------------
-  - name: cargo-fmt-check
-    image: rust:1.83
-    commands:
-      - rustup component add rustfmt
-      - echo "▶ Checking Rust formatting..."
-      - cargo fmt --all -- --check
-      - echo "✅ cargo fmt check passed"
+    when:
+      evaluate: 'NO_CHANGES != "true"'
     depends_on:
-      - cargo-check
+      - rustfmt
 
   # ------------------------------------------------------------
-  # 3. Unit-тесты DTO
+  # 9. Unit-тесты DTO
   # ------------------------------------------------------------
   - name: cargo-test-serde
     image: rust:1.83
     commands:
-      - echo "▶ Running serde DTO unit tests..."
+      - cd target-rust
       - cargo test --test serde_dto -- --nocapture
       - echo "✅ serde DTO tests passed"
+    when:
+      evaluate: 'NO_CHANGES != "true"'
     depends_on:
-      - cargo-fmt-check
+      - cargo-check
 
   # ------------------------------------------------------------
-  # 4. Уведомление об успехе
+  # 10. Публикация Pull Request
+  # ------------------------------------------------------------
+  - name: publish-pr
+    image: python:3.12-slim
+    environment:
+      GITHUB_TOKEN:
+        from_secret: github_token
+      RUST_TARGET_REPO:
+        from_secret: rust_target_repo
+    commands:
+      - pip install --quiet PyGithub==2.5.0
+      - |
+        python - <<'PY'
+        import os
+        from pathlib import Path
+        from src.github_publisher import GitHubPublisher
+
+        repo_name = os.environ["RUST_TARGET_REPO"]
+        publisher = GitHubPublisher(repo_name=repo_name)
+
+        pr_url = publisher.publish(
+            generated_dir=Path("generated_output"),
+            target_path="src/incus/generated_prototype",
+        )
+
+        print(f"PR created: {pr_url}")
+
+        env_file = os.environ.get("CI_ENV_FILE", "/dev/null")
+        with open(env_file, "a", encoding="utf-8") as f:
+            f.write(f"PR_URL={pr_url}\n")
+        PY
+      - echo "✅ Pull Request published"
+    when:
+      evaluate: 'NO_CHANGES != "true"'
+    depends_on:
+      - cargo-test-serde
+
+  # ------------------------------------------------------------
+  # 11. (Опционально) триггер downstream CI Rust-репозитория
+  # ------------------------------------------------------------
+  - name: trigger-rust-ci
+    image: python:3.12-slim
+    environment:
+      WOODPECKER_URL:
+        from_secret: woodpecker_url
+      WOODPECKER_TOKEN:
+        from_secret: woodpecker_token
+      WOODPECKER_REPO:
+        from_secret: woodpecker_repo
+    commands:
+      - pip install --quiet requests==2.32.3
+      - |
+        python - <<'PY'
+        from src.woodpecker_trigger import WoodpeckerTrigger
+
+        trigger = WoodpeckerTrigger()
+        url = trigger.trigger_pipeline(branch="main")
+        print(f"Downstream Rust CI triggered: {url}")
+
+        env_file = __import__("os").environ.get("CI_ENV_FILE", "/dev/null")
+        with open(env_file, "a", encoding="utf-8") as f:
+            f.write(f"RUST_CI_URL={url}\n")
+        PY
+      - echo "✅ Downstream Rust CI triggered"
+    when:
+      evaluate: 'NO_CHANGES != "true"'
+    depends_on:
+      - publish-pr
+
+  # ------------------------------------------------------------
+  # 12. Обновление persistent state
+  # ------------------------------------------------------------
+  - name: update-state
+    image: python:3.12-slim
+    environment:
+      SYNC_STATE_FILE: /ci-state/incus-sync/.sync_state
+    commands:
+      - |
+        python - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+        from src.monitor import save_state
+
+        changes = json.loads(Path("state/changes.json").read_text(encoding="utf-8"))
+        last_sha = changes.get("last_sha")
+
+        if last_sha:
+            save_state(last_sha, Path(os.environ["SYNC_STATE_FILE"]))
+            print(f"State updated: {last_sha}")
+        else:
+            print("No last_sha found, state not updated")
+        PY
+      - echo "✅ Sync state updated"
+    when:
+      evaluate: 'NO_CHANGES != "true"'
+    depends_on:
+      - trigger-rust-ci
+
+  # ------------------------------------------------------------
+  # 13. Уведомление: изменений нет
+  # ------------------------------------------------------------
+  - name: notify-no-changes
+    image: deblan/woodpecker-email
+    settings:
+      dsn:
+        from_secret: email_dsn
+      from:
+        address:
+          from_secret: email_username
+        name: Incus Sync Bot
+      recipients:
+        from_secret: email_recipient
+      recipients_only: true
+      content_type: text/plain
+      subject: "ℹ️ Incus Sync: изменений не обнаружено (pipeline #${CI_PIPELINE_NUMBER})"
+      body: |
+        Здравствуйте!
+
+        Pipeline Incus Model Sync завершился успешно, но новых релевантных
+        изменений в Go-репозитории Incus не обнаружено.
+
+        Сводка:
+          • Pipeline: ${CI_PIPELINE_URL}
+          • Репозиторий генератора: ${CI_REPO}
+
+        Действий не требуется.
+
+        —
+        Incus Sync Bot
+    when:
+      - status: success
+        evaluate: 'NO_CHANGES == "true"'
+    depends_on:
+      - monitor-changes
+
+  # ------------------------------------------------------------
+  # 14. Уведомление: успех
   # ------------------------------------------------------------
   - name: notify-success
     image: deblan/woodpecker-email
@@ -51,40 +346,46 @@ steps:
       from:
         address:
           from_secret: email_username
-        name: Incus Rust CI Bot
+        name: Incus Sync Bot
       recipients:
         from_secret: email_recipient
       recipients_only: true
       content_type: text/plain
-      subject: "✅ incus-lab-manager CI: проверка прошла (pipeline #${CI_PIPELINE_NUMBER})"
+      subject: "✅ Incus Sync: синхронизация выполнена (pipeline #${CI_PIPELINE_NUMBER})"
       body: |
         Здравствуйте!
 
-        CI pipeline для incus-lab-manager успешно завершён.
+        Pipeline Incus Model Sync успешно завершён.
 
-        Что было выполнено:
-          • cargo check --all-targets
-          • cargo fmt --all -- --check
-          • cargo test --test serde_dto -- --nocapture
+        Что произошло:
+          • Обнаружены изменения в Go-репозитории Incus
+          • Выполнен AST-парсинг Go-моделей
+          • Сгенерированы Rust DTO
+          • Код отформатирован через cargo fmt
+          • Выполнен cargo check
+          • Пройдены unit-тесты serde_dto
+          • Создан Pull Request
+          • Обновлён .sync_state
 
         Сводка:
-          • Репозиторий: ${CI_REPO}
-          • Ветка: ${CI_COMMIT_BRANCH}
-          • Коммит: ${CI_COMMIT_SHA}
+          • Коммит Incus: ${INCUS_SHA}
+          • Изменённых API-файлов: ${API_CHANGED_COUNT}
+          • Изменений в client/: ${CLIENT_CHANGED_COUNT}
+          • Сгенерировано Rust-файлов: ${GENERATED_COUNT}
+          • Pull Request: ${PR_URL}
+          • Downstream Rust CI: ${RUST_CI_URL}
           • Pipeline: ${CI_PIPELINE_URL}
 
-        Integration-тесты с реальным Incus в CI не запускались.
-        Они выполняются локально вручную.
-
         —
-        Incus Rust CI Bot
+        Incus Sync Bot
     when:
       - status: success
+        evaluate: 'NO_CHANGES != "true"'
     depends_on:
-      - cargo-test-serde
+      - update-state
 
   # ------------------------------------------------------------
-  # 5. Уведомление об ошибке
+  # 15. Уведомление: ошибка
   # ------------------------------------------------------------
   - name: notify-failure
     image: deblan/woodpecker-email
@@ -94,31 +395,41 @@ steps:
       from:
         address:
           from_secret: email_username
-        name: Incus Rust CI Bot
+        name: Incus Sync Bot
       recipients:
         from_secret: email_recipient
       recipients_only: true
       content_type: text/plain
-      subject: "⚠️ incus-lab-manager CI: ошибка проверки (pipeline #${CI_PIPELINE_NUMBER})"
+      subject: "⚠️ Incus Sync: ошибка синхронизации (pipeline #${CI_PIPELINE_NUMBER})"
       body: |
         Здравствуйте!
 
-        CI pipeline для incus-lab-manager завершился с ошибкой.
+        Pipeline Incus Model Sync завершился с ошибкой.
+
+        Что происходило:
+          • Выполнялась автоматическая синхронизация Go-моделей Incus в Rust DTO
+          • На одном из этапов произошёл отказ
+          • Pull Request не должен считаться валидным до ручной проверки
 
         Возможные этапы отказа:
+          • мониторинг изменений
+          • парсинг Go-структур
+          • шаблонная генерация
+          • LLM repair
+          • rustfmt
           • cargo check
-          • cargo fmt --check
-          • cargo test --test serde_dto
+          • unit-тесты serde_dto
+          • публикация PR
 
         Сводка:
-          • Репозиторий: ${CI_REPO}
-          • Ветка: ${CI_COMMIT_BRANCH}
-          • Коммит: ${CI_COMMIT_SHA}
+          • Коммит Incus: ${INCUS_SHA}
           • Pipeline: ${CI_PIPELINE_URL}
+          • Pull Request (если успел создаться): ${PR_URL}
 
-        Требуется анализ логов pipeline.
+        Требуется анализ логов pipeline и, при необходимости,
+        ручное вмешательство инженера.
 
         —
-        Incus Rust CI Bot
+        Incus Sync Bot
     when:
       - status: failure
