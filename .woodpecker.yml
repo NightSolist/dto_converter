@@ -18,11 +18,7 @@ steps:
 
   - name: debug-secrets
     image: alpine:latest
-    environment:
-      GITHUB_TOKEN:
-        from_secret: github_token
-      INCUS_SOURCE_REPO:
-        from_secret: incus_source_repo
+    secrets: [github_token, incus_source_repo]
     commands:
       - 'echo "Token length: ${#GITHUB_TOKEN}"'
       - 'echo "Repo: [${INCUS_SOURCE_REPO}]"'
@@ -34,7 +30,7 @@ steps:
   # 2. Клонирование Incus source repo
   # ------------------------------------------------------------
   - name: clone-incus-source
-    image: alpine:latest
+    image: alpine/git
     environment:
       GITHUB_TOKEN:
         from_secret: github_token
@@ -117,7 +113,7 @@ steps:
   # 5. Клонирование целевого Rust-репозитория
   # ------------------------------------------------------------
   - name: clone-rust-target
-    image: alpine:latest
+    image: alpine/git
     environment:
       GITHUB_TOKEN:
         from_secret: github_token
@@ -136,7 +132,7 @@ steps:
   # 6. Подмена generated_prototype в целевом Rust-репозитории
   # ------------------------------------------------------------
   - name: inject-generated
-    image: alpine:latest
+    image: alpine:3.20
     commands:
       - rm -rf target-rust/src/incus/generated_prototype/*.rs
       - cp generated_output/*.rs target-rust/src/incus/generated_prototype/
