@@ -9,13 +9,6 @@ steps:
   # ------------------------------------------------------------
   # 1. Сборка Go AST parser
   # ------------------------------------------------------------
-  - name: build-parser
-    image: golang:1.22
-    commands:
-      - cd src/go-ast-parser
-      - go build -o parser main.go
-      - echo "✅ Go AST parser built"
-
   - name: debug-secrets
     image: alpine:3.20
     environment:
@@ -24,8 +17,11 @@ steps:
       INCUS_SOURCE_REPO:
         from_secret: incus_source_repo
     commands:
-      - echo "TOKEN length: ${#GITHUB_TOKEN}"
-      - echo "SOURCE REPO: ${INCUS_SOURCE_REPO}"
+      - 'echo "Token length: ${#GITHUB_TOKEN}"'
+      - 'echo "Repo: [${INCUS_SOURCE_REPO}]"'
+      - 'echo "First 4 chars of token: ${GITHUB_TOKEN:0:4}"'
+    depends_on:
+      - build-parser
 
   # ------------------------------------------------------------
   # 2. Клонирование Incus source repo
