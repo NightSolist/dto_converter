@@ -49,38 +49,21 @@ steps:
       - mkdir -p state
       - mkdir -p /ci-state/incus-sync
       - |
-        python - <<'PY'
-        import json
-        import os
+        python -c "
+        import json, os
         from pathlib import Path
         from src.monitor import run_monitor
-
-        state_file = Path(os.environ["SYNC_STATE_FILE"])
-        output_file = Path("state/changes.json")
-
-        result = run_monitor(
-            repo_name=os.environ["INCUS_SOURCE_REPO"],
-            state_file=state_file,
-            output_file=output_file,
-        )
-
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-
-        env_file = os.environ.get("CI_ENV_FILE", "/dev/null")
-        with open(env_file, "a", encoding="utf-8") as f:
-            if result.get("no_changes"):
-                f.write("NO_CHANGES=true\n")
+        res = run_monitor(repo_name=os.environ['INCUS_SOURCE_REPO'], state_file=Path(os.environ['SYNC_STATE_FILE']), output_file=Path('state/changes.json'))
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        with open(os.environ.get('CI_ENV_FILE', '/dev/null'), 'a', encoding='utf-8') as f:
+            if res.get('no_changes'):
+                f.write('NO_CHANGES=true\n')
             else:
-                f.write("NO_CHANGES=false\n")
-                last_sha = result.get("last_sha", "")
-                f.write(f"INCUS_SHA={last_sha}\n")
-
-                api_files = result.get("api_changes", {}).get("files", [])
-                client_files = result.get("client_changes", {}).get("files", [])
-
-                f.write(f"API_CHANGED_COUNT={len(api_files)}\n")
-                f.write(f"CLIENT_CHANGED_COUNT={len(client_files)}\n")
-        PY
+                f.write('NO_CHANGES=false\n')
+                f.write(f\"INCUS_SHA={res.get('last_sha', '')}\n\")
+                f.write(f\"API_CHANGED_COUNT={len(res.get('api_changes', {}).get('files', []))}\n\")
+                f.write(f\"CLIENT_CHANGED_COUNT={len(res.get('client_changes', {}).get('files', []))}\n\")
+        "
       - echo "✅ Monitoring finished"
     depends_on:
       - clone-incus-source
@@ -101,19 +84,15 @@ steps:
       - pip3 install --quiet --break-system-packages requests==2.32.3 Jinja2==3.1.4
       - rm -rf generated_output
       - mkdir -p generated_output
-      - python3 - <<'PY'
+      - |
+        python3 -c "
+        import sys
         from src.pipeline import Pipeline
-
-        pipeline = Pipeline()
-        success = pipeline.run()
-
-        if not success:
-            raise SystemExit(1)
-        PY
+        sys.exit(0 if Pipeline().run() else 1)
+        "
       - echo "✅ DTO generation completed"
       - |
         count=$(find generated_output -maxdepth 1 -name "*.rs" | wc -l)
-        echo "Generated files: ${count}"
         echo "GENERATED_COUNT=${count}" >> "${CI_ENV_FILE}"
     when:
       evaluate: 'NO_CHANGES != "true"'
@@ -163,7 +142,6 @@ steps:
       - cd target-rust
       - cargo fmt --all
       - echo "✅ Rust code formatted"
-      # копируем отформатированные файлы обратно, чтобы PR содержал уже rustfmt-версию
       - cp src/incus/generated_prototype/*.rs ../generated_output/
     when:
       evaluate: 'NO_CHANGES != "true"'
@@ -211,25 +189,16 @@ steps:
     commands:
       - pip install --quiet PyGithub==2.5.0
       - |
-        python - <<'PY'
+        python -c "
         import os
         from pathlib import Path
         from src.github_publisher import GitHubPublisher
-
-        repo_name = os.environ["RUST_TARGET_REPO"]
-        publisher = GitHubPublisher(repo_name=repo_name)
-
-        pr_url = publisher.publish(
-            generated_dir=Path("generated_output"),
-            target_path="src/incus/generated_prototype",
-        )
-
-        print(f"PR created: {pr_url}")
-
-        env_file = os.environ.get("CI_ENV_FILE", "/dev/null")
-        with open(env_file, "a", encoding="utf-8") as f:
-            f.write(f"PR_URL={pr_url}\n")
-        PY
+        pub = GitHubPublisher(repo_name=os.environ['RUST_TARGET_REPO'])
+        url = pub.publish(generated_dir=Path('generated_output'), target_path='src/incus/generated_prototype')
+        with open(os.environ.get('CI_ENV_FILE', '/dev/null'), 'a', encoding='utf-8') as f:
+            f.write(f'PR_URL={url}\\n')
+        print(f'PR created: {url}')
+        "
       - echo "✅ Pull Request published"
     when:
       evaluate: 'NO_CHANGES != "true"'
@@ -237,39 +206,7 @@ steps:
       - cargo-test-serde
 
   # ------------------------------------------------------------
-  # 11. (Опционально) триггер downstream CI Rust-репозитория
-  # ------------------------------------------------------------
-  - name: trigger-rust-ci
-    image: python:3.12-slim
-    environment:
-      WOODPECKER_URL:
-        from_secret: woodpecker_url
-      WOODPECKER_TOKEN:
-        from_secret: woodpecker_token
-      WOODPECKER_REPO:
-        from_secret: woodpecker_repo
-    commands:
-      - pip install --quiet requests==2.32.3
-      - |
-        python - <<'PY'
-        from src.woodpecker_trigger import WoodpeckerTrigger
-
-        trigger = WoodpeckerTrigger()
-        url = trigger.trigger_pipeline(branch="main")
-        print(f"Downstream Rust CI triggered: {url}")
-
-        env_file = __import__("os").environ.get("CI_ENV_FILE", "/dev/null")
-        with open(env_file, "a", encoding="utf-8") as f:
-            f.write(f"RUST_CI_URL={url}\n")
-        PY
-      - echo "✅ Downstream Rust CI triggered"
-    when:
-      evaluate: 'NO_CHANGES != "true"'
-    depends_on:
-      - publish-pr
-
-  # ------------------------------------------------------------
-  # 12. Обновление persistent state
+  # 11. Обновление persistent state
   # ------------------------------------------------------------
   - name: update-state
     image: python:3.12-slim
@@ -277,66 +214,23 @@ steps:
       SYNC_STATE_FILE: /ci-state/incus-sync/.sync_state
     commands:
       - |
-        python - <<'PY'
-        import json
-        import os
+        python -c "
+        import json, os
         from pathlib import Path
         from src.monitor import save_state
-
-        changes = json.loads(Path("state/changes.json").read_text(encoding="utf-8"))
-        last_sha = changes.get("last_sha")
-
-        if last_sha:
-            save_state(last_sha, Path(os.environ["SYNC_STATE_FILE"]))
-            print(f"State updated: {last_sha}")
-        else:
-            print("No last_sha found, state not updated")
-        PY
+        sha = json.loads(Path('state/changes.json').read_text(encoding='utf-8')).get('last_sha')
+        if sha:
+            save_state(sha, Path(os.environ['SYNC_STATE_FILE']))
+            print(f'State updated: {sha}')
+        "
       - echo "✅ Sync state updated"
     when:
       evaluate: 'NO_CHANGES != "true"'
     depends_on:
-      - trigger-rust-ci
+      - publish-pr
 
   # ------------------------------------------------------------
-  # 13. Уведомление: изменений нет
-  # ------------------------------------------------------------
-  - name: notify-no-changes
-    image: deblan/woodpecker-email
-    settings:
-      dsn:
-        from_secret: email_dsn
-      from:
-        address:
-          from_secret: email_username
-        name: Incus Sync Bot
-      recipients:
-        from_secret: email_recipient
-      recipients_only: true
-      content_type: text/plain
-      subject: "ℹ️ Incus Sync: изменений не обнаружено (pipeline #${CI_PIPELINE_NUMBER})"
-      body: |
-        Здравствуйте!
-
-        Pipeline Incus Model Sync завершился успешно, но новых релевантных
-        изменений в Go-репозитории Incus не обнаружено.
-
-        Сводка:
-          • Pipeline: ${CI_PIPELINE_URL}
-          • Репозиторий генератора: ${CI_REPO}
-
-        Действий не требуется.
-
-        —
-        Incus Sync Bot
-    when:
-      - status: success
-        evaluate: 'NO_CHANGES == "true"'
-    depends_on:
-      - monitor-changes
-
-  # ------------------------------------------------------------
-  # 14. Уведомление: успех
+  # 12. Уведомление: успех
   # ------------------------------------------------------------
   - name: notify-success
     image: deblan/woodpecker-email
@@ -357,23 +251,11 @@ steps:
 
         Pipeline Incus Model Sync успешно завершён.
 
-        Что произошло:
-          • Обнаружены изменения в Go-репозитории Incus
-          • Выполнен AST-парсинг Go-моделей
-          • Сгенерированы Rust DTO
-          • Код отформатирован через cargo fmt
-          • Выполнен cargo check
-          • Пройдены unit-тесты serde_dto
-          • Создан Pull Request
-          • Обновлён .sync_state
-
         Сводка:
           • Коммит Incus: ${INCUS_SHA}
           • Изменённых API-файлов: ${API_CHANGED_COUNT}
-          • Изменений в client/: ${CLIENT_CHANGED_COUNT}
           • Сгенерировано Rust-файлов: ${GENERATED_COUNT}
           • Pull Request: ${PR_URL}
-          • Downstream Rust CI: ${RUST_CI_URL}
           • Pipeline: ${CI_PIPELINE_URL}
 
         —
@@ -385,7 +267,7 @@ steps:
       - update-state
 
   # ------------------------------------------------------------
-  # 15. Уведомление: ошибка
+  # 13. Уведомление: ошибка
   # ------------------------------------------------------------
   - name: notify-failure
     image: deblan/woodpecker-email
@@ -406,28 +288,12 @@ steps:
 
         Pipeline Incus Model Sync завершился с ошибкой.
 
-        Что происходило:
-          • Выполнялась автоматическая синхронизация Go-моделей Incus в Rust DTO
-          • На одном из этапов произошёл отказ
-          • Pull Request не должен считаться валидным до ручной проверки
-
-        Возможные этапы отказа:
-          • мониторинг изменений
-          • парсинг Go-структур
-          • шаблонная генерация
-          • LLM repair
-          • rustfmt
-          • cargo check
-          • unit-тесты serde_dto
-          • публикация PR
-
         Сводка:
           • Коммит Incus: ${INCUS_SHA}
           • Pipeline: ${CI_PIPELINE_URL}
-          • Pull Request (если успел создаться): ${PR_URL}
+          • PR (если успел): ${PR_URL}
 
-        Требуется анализ логов pipeline и, при необходимости,
-        ручное вмешательство инженера.
+        Требуется анализ логов pipeline.
 
         —
         Incus Sync Bot
