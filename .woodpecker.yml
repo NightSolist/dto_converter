@@ -137,9 +137,30 @@ steps:
         echo "$${count}" > state/.generated_count
     depends_on:
       - clone-incus-source
+  
+  # ------------------------------------------------------------
+  # 5. Форматирование сгенерированных Rust-файлов
+  # ------------------------------------------------------------
+  - name: rustfmt-generated
+    image: rust:1.83
+    commands:
+      - |
+        if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
+          echo "⏭️  No changes detected, skipping rustfmt"
+          exit 0
+        fi
+      - rustup component add rustfmt
+      - |
+        for f in generated_output/*.rs; do
+          echo "🧹 Formatting $f"
+          rustfmt --edition 2021 "$f"
+        done
+      - echo "✅ Generated Rust files formatted"
+    depends_on:
+      - generate-models
 
   # ------------------------------------------------------------
-  # 5. Публикация Pull Request в Rust-репозиторий
+  # 6. Публикация Pull Request в Rust-репозиторий
   # ------------------------------------------------------------
   - name: publish-pr
     image: python:3.12-slim
@@ -170,10 +191,10 @@ steps:
         "
       - echo "✅ Pull Request published"
     depends_on:
-      - generate-models
+      - rustfmt-generated
 
   # ------------------------------------------------------------
-  # 6. Обновление persistent state
+  # 7. Обновление persistent state
   # ------------------------------------------------------------
   - name: update-state
     image: python:3.12-slim
@@ -200,7 +221,7 @@ steps:
       - publish-pr
 
   # ------------------------------------------------------------
-  # 7. Уведомление: успех (только если были изменения)
+  # 8. Уведомление: успех (только если были изменения)
   # ------------------------------------------------------------
   - name: notify-success
     image: python:3.12-slim
@@ -304,7 +325,7 @@ steps:
       - update-state
 
   # ------------------------------------------------------------
-  # 8. Уведомление: ошибка (всегда при отказе любого шага)
+  # 9. Уведомление: ошибка (всегда при отказе любого шага)
   # ------------------------------------------------------------
   - name: notify-failure
     image: python:3.12-slim
