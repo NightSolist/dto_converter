@@ -17,7 +17,7 @@ steps:
       - echo "✅ Go AST parser built"
 
   # ------------------------------------------------------------
-  # 2. Мониторинг изменений (без клонирования Incus)
+  # 2. Мониторинг изменений Incus (без клонирования)
   # ------------------------------------------------------------
   - name: monitor-changes
     image: python:3.12-slim
@@ -97,7 +97,7 @@ steps:
       - monitor-changes
 
   # ------------------------------------------------------------
-  # 4. Генерация DTO
+  # 4. Генерация DTO (template-first + LLM repair)
   # ------------------------------------------------------------
   - name: generate-models
     image: rust:1.83
@@ -134,100 +134,7 @@ steps:
       - clone-incus-source
 
   # ------------------------------------------------------------
-  # 5. Клонирование целевого Rust-репозитория
-  # ------------------------------------------------------------
-  - name: clone-rust-target
-    image: alpine/git
-    environment:
-      GITHUB_TOKEN:
-        from_secret: github_token
-      RUST_TARGET_REPO:
-        from_secret: rust_target_repo
-    commands:
-      - |
-        if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
-          echo "⏭️  No changes detected, skipping Rust target clone"
-          exit 0
-        fi
-      - git config --global --add safe.directory '*'
-      - rm -rf target-rust
-      - 'git clone --depth=1 "https://x-access-token:$${GITHUB_TOKEN}@github.com/$${RUST_TARGET_REPO}.git" target-rust'
-      - echo "✅ Rust target repo cloned"
-    depends_on:
-      - generate-models
-
-  # ------------------------------------------------------------
-  # 6. Подмена generated_prototype в целевом Rust-репозитории
-  # ------------------------------------------------------------
-  - name: inject-generated
-    image: alpine:latest
-    commands:
-      - |
-        if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
-          echo "⏭️  No changes detected, skipping inject"
-          exit 0
-        fi
-      - rm -rf target-rust/src/incus/generated_prototype/*.rs
-      - cp generated_output/*.rs target-rust/src/incus/generated_prototype/
-      - echo "✅ Generated files copied into Rust target repo"
-    depends_on:
-      - clone-rust-target
-
-  # ------------------------------------------------------------
-  # 7. Форматирование Rust-кода
-  # ------------------------------------------------------------
-  - name: rustfmt
-    image: rust:1.83
-    commands:
-      - |
-        if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
-          echo "⏭️  No changes detected, skipping rustfmt"
-          exit 0
-        fi
-      - rustup component add rustfmt
-      - cd target-rust
-      - cargo fmt --all
-      - echo "✅ Rust code formatted"
-      - cp src/incus/generated_prototype/*.rs ../generated_output/
-    depends_on:
-      - inject-generated
-
-  # ------------------------------------------------------------
-  # 8. Компиляционная проверка Rust-репозитория
-  # ------------------------------------------------------------
-  - name: cargo-check
-    image: rust:1.83
-    commands:
-      - |
-        if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
-          echo "⏭️  No changes detected, skipping cargo check"
-          exit 0
-        fi
-      - cd target-rust
-      - cargo check --all-targets
-      - echo "✅ cargo check passed"
-    depends_on:
-      - rustfmt
-
-  # ------------------------------------------------------------
-  # 9. Unit-тесты DTO
-  # ------------------------------------------------------------
-  - name: cargo-test-serde
-    image: rust:1.83
-    commands:
-      - |
-        if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
-          echo "⏭️  No changes detected, skipping serde tests"
-          exit 0
-        fi
-      - cd target-rust
-      - cargo test --test serde_dto -- --nocapture
-      - echo "✅ serde DTO tests passed"
-    depends_on:
-      - cargo-check
-
-  # ------------------------------------------------------------
-  # 10. Публикация Pull Request
+  # 5. Публикация Pull Request в Rust-репозиторий
   # ------------------------------------------------------------
   - name: publish-pr
     image: python:3.12-slim
@@ -258,10 +165,10 @@ steps:
         "
       - echo "✅ Pull Request published"
     depends_on:
-      - cargo-test-serde
+      - generate-models
 
   # ------------------------------------------------------------
-  # 11. Обновление persistent state
+  # 6. Обновление persistent state
   # ------------------------------------------------------------
   - name: update-state
     image: python:3.12-slim
@@ -288,7 +195,7 @@ steps:
       - publish-pr
 
   # ------------------------------------------------------------
-  # 12. Уведомление: успех
+  # 7. Уведомление: успех
   # ------------------------------------------------------------
   - name: notify-success
     image: deblan/woodpecker-email
@@ -303,27 +210,27 @@ steps:
         from_secret: email_recipient
       recipients_only: true
       content_type: text/plain
-      subject: "✅ Incus Sync: синхронизация выполнена (pipeline #${CI_PIPELINE_NUMBER})"
+      subject: "✅ Incus Sync: PR создан (pipeline #${CI_PIPELINE_NUMBER})"
       body: |
         Здравствуйте!
 
-        Pipeline Incus Model Sync успешно завершён.
+        Pipeline синхронизации Incus -> Rust успешно завершён.
+
+        Что было выполнено:
+          • Мониторинг изменений Go-репозитория Incus
+          • AST-парсинг Go-моделей
+          • Шаблонная генерация Rust DTO (template-first)
+          • LLM repair шаблонного результата при необходимости
+          • Публикация Pull Request в целевой Rust-репозиторий
+
+        После публикации PR качество кода
+        проверяет независимый CI потребителя
+        (incus-lab-manager): cargo check, cargo fmt --check,
+        cargo test --test serde_dto.
 
         Сводка:
           • Репозиторий генератора: ${CI_REPO}
           • Pipeline: ${CI_PIPELINE_URL}
-          • Подробности: смотрите файлы в state/ workspace pipeline.
-
-        Что было выполнено:
-          • Мониторинг изменений Incus
-          • Парсинг Go-структур через AST
-          • Шаблонная генерация DTO (template-first)
-          • LLM repair (если потребовалось)
-          • Форматирование cargo fmt
-          • Компиляционная проверка cargo check
-          • Unit-тесты DTO (serde_dto)
-          • Создание Pull Request
-          • Обновление .sync_state
 
         —
         Incus Sync Bot
@@ -333,7 +240,7 @@ steps:
       - update-state
 
   # ------------------------------------------------------------
-  # 13. Уведомление: ошибка
+  # 8. Уведомление: ошибка
   # ------------------------------------------------------------
   - name: notify-failure
     image: deblan/woodpecker-email
@@ -352,19 +259,18 @@ steps:
       body: |
         Здравствуйте!
 
-        Pipeline Incus Model Sync завершился с ошибкой.
+        Pipeline синхронизации Incus -> Rust завершился с ошибкой.
+
+        Возможные этапы отказа:
+          • Мониторинг
+          • Клонирование Incus
+          • Генерация DTO
+          • LLM repair
+          • Публикация PR
 
         Сводка:
           • Репозиторий генератора: ${CI_REPO}
           • Pipeline: ${CI_PIPELINE_URL}
-
-        Возможные этапы отказа:
-          • Мониторинг изменений
-          • Клонирование Incus
-          • Генерация DTO
-          • LLM repair
-          • Rustfmt / cargo check / serde_dto
-          • Публикация PR
 
         Требуется анализ логов pipeline.
 
