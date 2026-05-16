@@ -1,17 +1,28 @@
 import os
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from github import Auth, Github, GithubException
 from github.InputGitTreeElement import InputGitTreeElement
 
 
+@dataclass
+class PublishResult:
+    pr_url: Optional[str]
+    branch_name: Optional[str]
+    changed_files: List[str]
+    generated_files: List[str]
+    skipped_no_diff: bool = False
+
+
 class GitHubPublisher:
     """
     Публикует сгенерированные Rust-файлы в GitHub-репозиторий:
+    - сравнивает generated_output с base branch
     - создаёт новую ветку
-    - формирует один commit со всеми файлами (через Git Tree API)
+    - формирует один commit только по реально изменившимся файлам
     - создаёт Pull Request
     """
 
@@ -25,7 +36,8 @@ class GitHubPublisher:
         self.token = token or os.getenv("GITHUB_TOKEN")
         if not self.token:
             raise ValueError(
-                "GITHUB_TOKEN не задан. Укажите его в переменных окружения."
+                "GITHUB_TOKEN не задан. "
+                "Укажите его в переменных окружения."
             )
 
         self.gh = Github(auth=Auth.Token(self.token))
@@ -38,48 +50,96 @@ class GitHubPublisher:
         generated_dir: Path,
         target_path: str = "src/incus/generated_prototype",
         branch_prefix: str = "sync/auto",
-    ) -> str:
+    ) -> PublishResult:
         """
         Публикует содержимое generated_dir в GitHub-репозиторий.
-        Возвращает URL созданного Pull Request.
+        Возвращает подробный результат публикации.
         """
         if not generated_dir.exists():
-            raise ValueError(f"Каталог не найден: {generated_dir}")
+            raise ValueError(
+                f"Каталог не найден: {generated_dir}"
+            )
 
         files = sorted(generated_dir.glob("*.rs"))
         if not files:
-            raise ValueError(f"В каталоге {generated_dir} не найдено .rs файлов")
+            raise ValueError(
+                f"В каталоге {generated_dir} "
+                f"не найдено .rs файлов"
+            )
 
-        timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-        branch_name = f"{branch_prefix}-{timestamp}"
+        generated_files = [
+            f"{target_path}/{file_path.name}"
+            for file_path in files
+        ]
 
-        print(f"📦 Подготовка публикации {len(files)} файлов...")
-        print(f"📁 Источник: {generated_dir}")
-        print(f"📂 Целевой путь в репозитории: {target_path}")
-
-        # 1. Получаем последний commit базовой ветки
-        base_branch_obj = self.repo.get_branch(self.base_branch)
-        base_commit = self.repo.get_git_commit(base_branch_obj.commit.sha)
-        base_tree = base_commit.tree
-
-        # 2. Формируем новое дерево поверх base_tree
+        changed_files: List[str] = []
         elements = []
+
         for file_path in files:
             content = file_path.read_text(encoding="utf-8")
             repo_file_path = f"{target_path}/{file_path.name}"
 
-            elements.append(
-                InputGitTreeElement(
-                    path=repo_file_path,
-                    mode="100644",
-                    type="blob",
-                    content=content,
+            if self._differs_from_base(
+                repo_file_path, content
+            ):
+                changed_files.append(repo_file_path)
+                elements.append(
+                    InputGitTreeElement(
+                        path=repo_file_path,
+                        mode="100644",
+                        type="blob",
+                        content=content,
+                    )
                 )
+
+        print(
+            f"📦 Подготовка публикации "
+            f"{len(files)} файлов..."
+        )
+        print(f"📁 Источник: {generated_dir}")
+        print(
+            f"📂 Целевой путь в репозитории: {target_path}"
+        )
+        print(
+            f"📄 Всего сгенерировано файлов: "
+            f"{len(generated_files)}"
+        )
+        print(
+            f"📝 Реально изменившихся файлов: "
+            f"{len(changed_files)}"
+        )
+
+        if not changed_files:
+            print(
+                "ℹ️ Сгенерированные DTO не отличаются от "
+                f"текущего состояния {self.base_branch}. "
+                "PR не создаётся."
+            )
+            return PublishResult(
+                pr_url=None,
+                branch_name=None,
+                changed_files=[],
+                generated_files=generated_files,
+                skipped_no_diff=True,
             )
 
-        new_tree = self.repo.create_git_tree(elements, base_tree)
+        timestamp = datetime.now().strftime(
+            "%Y-%m-%d-%H%M%S"
+        )
+        branch_name = f"{branch_prefix}-{timestamp}"
 
-        # 3. Создаём один общий commit
+        base_branch_obj = self.repo.get_branch(
+            self.base_branch
+        )
+        base_commit = self.repo.get_git_commit(
+            base_branch_obj.commit.sha
+        )
+        base_tree = base_commit.tree
+
+        new_tree = self.repo.create_git_tree(
+            elements, base_tree
+        )
+
         commit_message = (
             f"🤖 Auto-sync Incus models ({timestamp})\n\n"
             f"Generated by incus-model-sync."
@@ -90,16 +150,18 @@ class GitHubPublisher:
             [base_commit],
         )
 
-        # 4. Создаём новую ветку от этого commit
         self.repo.create_git_ref(
             ref=f"refs/heads/{branch_name}",
             sha=new_commit.sha,
         )
         print(f"🌿 Ветка создана: {branch_name}")
 
-        # 5. Открываем Pull Request
-        pr_title = f"🔄 Auto-sync Incus models ({timestamp})"
-        pr_body = self._build_pr_body(files)
+        pr_title = (
+            f"🔄 Auto-sync Incus models ({timestamp})"
+        )
+        pr_body = self._build_pr_body(
+            changed_files, generated_files
+        )
 
         pr = self.repo.create_pull(
             title=pr_title,
@@ -110,34 +172,82 @@ class GitHubPublisher:
 
         print(f"📬 Pull Request создан: {pr.html_url}")
 
-        # 6. Назначаем ревьюера (если задан)
         if self.reviewer:
             try:
-                pr.create_review_request(reviewers=[self.reviewer])
-                print(f"👤 Назначен ревьюер: {self.reviewer}")
+                pr.create_review_request(
+                    reviewers=[self.reviewer]
+                )
+                print(
+                    f"👤 Назначен ревьюер: {self.reviewer}"
+                )
             except GithubException as e:
-                print(f"⚠️ Не удалось назначить ревьюера: {e}")
+                print(
+                    f"⚠️ Не удалось назначить ревьюера: {e}"
+                )
 
-        return pr.html_url
+        return PublishResult(
+            pr_url=pr.html_url,
+            branch_name=branch_name,
+            changed_files=changed_files,
+            generated_files=generated_files,
+            skipped_no_diff=False,
+        )
 
-    def _build_pr_body(self, files: list[Path]) -> str:
-        file_list = "\n".join(f"- `{f.name}`" for f in files)
+    def _differs_from_base(
+        self,
+        repo_file_path: str,
+        new_content: str,
+    ) -> bool:
+        """
+        Сравнивает содержимое файла с текущим
+        содержимым в base_branch.
+        Если файла нет — считаем его изменённым.
+        """
+        try:
+            content_file = self.repo.get_contents(
+                repo_file_path,
+                ref=self.base_branch,
+            )
+            current_content = (
+                content_file.decoded_content.decode("utf-8")
+            )
+            return current_content != new_content
+        except GithubException as e:
+            if e.status == 404:
+                return True
+            raise
+
+    def _build_pr_body(
+        self,
+        changed_files: list[str],
+        generated_files: list[str],
+    ) -> str:
+        changed_list = "\n".join(
+            f"- `{f}`" for f in changed_files
+        )
 
         return f"""## 🤖 Автоматическая синхронизация моделей Incus
 
-Этот Pull Request создан автоматически системой `incus-model-sync`.
+Этот Pull Request создан автоматически системой \
+`incus-model-sync`.
 
 ### Что изменилось
-Обновлены Rust DTO-модели на основе изменений в Go-репозитории Incus.
+Обновлены Rust DTO-модели на основе изменений \
+в Go-репозитории Incus.
 
-### Затронутые файлы ({len(files)} шт.)
-{file_list}
+### Сводка
+- Всего сгенерировано файлов: **{len(generated_files)}**
+- Реально изменилось относительно `main`: \
+**{len(changed_files)}**
+
+### Изменившиеся Rust-файлы
+{changed_list}
 
 ### Статус
 - ✅ Генерация выполнена успешно
-- ✅ Финальная компиляционная валидация (`cargo check`) пройдена
 - ✅ DTO подготовлены к review и merge
 
 ### Действия для инженера
-Пожалуйста, проверьте изменения и выполните merge, если всё корректно.
+Пожалуйста, проверьте изменения и выполните merge, \
+если всё корректно.
 """
