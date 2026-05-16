@@ -135,8 +135,8 @@ steps:
       - pip install --quiet --no-cache-dir Jinja2==3.1.4 requests==2.32.3
       - |
         echo "🔥 Warming up Ollama model..."
-        curl -s "${OLLAMA_URL}" \
-          -d "{\"model\":\"qwen2.5-coder:1.5b\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":false}" \
+        curl -s "$${OLLAMA_URL}" \
+          -d '{"model":"qwen2.5-coder:1.5b","messages":[{"role":"user","content":"hi"}],"stream":false}' \
           --max-time 300 || echo "⚠️ Warmup failed, continuing anyway"
       - rm -rf generated_output
       - mkdir -p generated_output
