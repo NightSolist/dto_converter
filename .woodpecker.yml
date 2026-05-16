@@ -79,6 +79,7 @@ steps:
           echo "⏭️  No changes detected, skipping Incus clone"
           exit 0
         fi
+      - git config --global --add safe.directory '*'
       - mkdir -p /ci-state/incus-src
       - cd /ci-state/incus-src
       - |
@@ -148,6 +149,7 @@ steps:
           echo "⏭️  No changes detected, skipping Rust target clone"
           exit 0
         fi
+      - git config --global --add safe.directory '*'
       - rm -rf target-rust
       - 'git clone --depth=1 "https://x-access-token:$${GITHUB_TOKEN}@github.com/$${RUST_TARGET_REPO}.git" target-rust'
       - echo "✅ Rust target repo cloned"
