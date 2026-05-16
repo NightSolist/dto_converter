@@ -117,6 +117,7 @@ steps:
       OUTPUT_DIR: /woodpecker/src/github.com/NightSolist/dto_converter/generated_output
       OLLAMA_URL:
         from_secret: ollama_url
+      OLLAMA_TIMEOUT: "300"
     volumes:
       - /home/dev/woodpecker-state:/ci-state
     commands:
@@ -132,6 +133,11 @@ steps:
       - rustc --version
       - cargo --version
       - pip install --quiet --no-cache-dir Jinja2==3.1.4 requests==2.32.3
+      - |
+        echo "🔥 Warming up Ollama model..."
+        curl -s "${OLLAMA_URL}" \
+          -d "{\"model\":\"qwen2.5-coder:1.5b\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":false}" \
+          --max-time 300 || echo "⚠️ Warmup failed, continuing anyway"
       - rm -rf generated_output
       - mkdir -p generated_output
       - |
