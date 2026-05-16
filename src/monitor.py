@@ -6,6 +6,12 @@ from typing import Optional
 
 from github import Github, GithubException, RateLimitExceededException
 
+# Реэкспортируем load_state / save_state из чистого модуля,
+# чтобы остальной код мог продолжать импортировать их из src.monitor,
+# но при этом CI-шаг update-state мог использовать src.state
+# без зависимости от PyGithub.
+from src.state import load_state, save_state  # noqa: F401
+
 
 INCUS_REPO = os.getenv("INCUS_SOURCE_REPO", "lxc/incus")
 STATE_FILE = Path("state/.sync_state")
@@ -15,26 +21,6 @@ LOOKBACK_DAYS = 30
 
 class MonitorError(Exception):
     pass
-
-
-def load_state(state_file: Path = STATE_FILE) -> Optional[str]:
-    if not state_file.exists():
-        return None
-
-    value = state_file.read_text(encoding="utf-8").strip()
-    return value or None
-
-
-def save_state(sha: str, state_file: Path = STATE_FILE) -> None:
-    """
-    Сохраняет SHA последнего успешно обработанного коммита.
-    Вызывается только из main.py после успешного завершения pipeline.
-    """
-    # Гарантируем, что папка state/ существует
-    state_file.parent.mkdir(parents=True, exist_ok=True) 
-    
-    state_file.write_text(sha, encoding="utf-8")
-    print(f"💾 .sync_state обновлён: {sha}")
 
 
 def get_github_repo(repo_name: str = INCUS_REPO):
@@ -53,7 +39,8 @@ def get_commits_since(
     lookback_days: int = LOOKBACK_DAYS,
 ) -> list:
     """
-    Возвращает список коммитов в хронологическом порядке: от старых к новым.
+    Возвращает список коммитов в хронологическом порядке:
+    от старых к новым.
     """
     if last_sha is None:
         since = datetime.now(timezone.utc) - timedelta(days=lookback_days)
@@ -186,7 +173,8 @@ def run_monitor(
     Проверяет новые коммиты в репозитории Incus.
 
     Возвращает словарь с результатами.
-    НЕ обновляет .sync_state — это делает main.py после успешного pipeline.
+    НЕ обновляет .sync_state — это делает отдельный шаг update-state
+    после успешного завершения pipeline.
     """
     try:
         repo = get_github_repo(repo_name)
@@ -195,6 +183,7 @@ def run_monitor(
 
         if not commits:
             result = build_empty_result(last_sha)
+            output_file.parent.mkdir(parents=True, exist_ok=True)
             output_file.write_text(
                 json.dumps(result, indent=2, ensure_ascii=False),
                 encoding="utf-8",
@@ -242,7 +231,9 @@ def run_monitor(
         )
 
         if no_changes:
-            print("Новых релевантных изменений в shared/api/ и client/ нет.")
+            print(
+                "Новых релевантных изменений в shared/api/ и client/ нет."
+            )
         else:
             print(
                 f"Найдено изменений: "
@@ -253,7 +244,9 @@ def run_monitor(
         return result
 
     except RateLimitExceededException as e:
-        raise MonitorError(f"Превышен лимит запросов GitHub API: {e}") from e
+        raise MonitorError(
+            f"Превышен лимит запросов GitHub API: {e}"
+        ) from e
     except GithubException as e:
         raise MonitorError(f"Ошибка GitHub API: {e}") from e
     except Exception as e:

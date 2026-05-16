@@ -180,12 +180,11 @@ steps:
           echo "⏭️  No changes detected, skipping state update"
           exit 0
         fi
-      - pip install --quiet PyGithub==2.5.0
       - |
         python -c "
         import json
         from pathlib import Path
-        from src.monitor import save_state
+        from src.state import save_state
         sha = json.loads(Path('state/changes.json').read_text(encoding='utf-8')).get('last_sha')
         if sha:
             save_state(sha, Path('/ci-state/incus-sync/.sync_state'))
@@ -210,9 +209,10 @@ steps:
       recipients:
         from_secret: email_recipient
       recipients_only: true
-      content_type: text/plain
-      subject: "✅ Incus Sync: PR создан (pipeline #${CI_PIPELINE_NUMBER})"
-      body: |
+      template: |
+        Subject: ✅ Incus Sync: PR создан (pipeline #${CI_PIPELINE_NUMBER})
+        Content-Type: text/plain; charset=UTF-8
+
         Здравствуйте!
 
         Pipeline синхронизации Incus -> Rust успешно завершён.
@@ -232,6 +232,8 @@ steps:
         Сводка:
           • Репозиторий генератора: ${CI_REPO}
           • Pipeline: ${CI_PIPELINE_URL}
+          • Коммит генератора: ${CI_COMMIT_SHA}
+          • Ветка: ${CI_COMMIT_BRANCH}
 
         —
         Incus Sync Bot
@@ -255,9 +257,10 @@ steps:
       recipients:
         from_secret: email_recipient
       recipients_only: true
-      content_type: text/plain
-      subject: "⚠️ Incus Sync: ошибка синхронизации (pipeline #${CI_PIPELINE_NUMBER})"
-      body: |
+      template: |
+        Subject: ⚠️ Incus Sync: ошибка синхронизации (pipeline #${CI_PIPELINE_NUMBER})
+        Content-Type: text/plain; charset=UTF-8
+
         Здравствуйте!
 
         Pipeline синхронизации Incus -> Rust завершился с ошибкой.
@@ -272,6 +275,8 @@ steps:
         Сводка:
           • Репозиторий генератора: ${CI_REPO}
           • Pipeline: ${CI_PIPELINE_URL}
+          • Коммит генератора: ${CI_COMMIT_SHA}
+          • Ветка: ${CI_COMMIT_BRANCH}
 
         Требуется анализ логов pipeline.
 
