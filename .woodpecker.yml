@@ -195,92 +195,195 @@ steps:
       - publish-pr
 
   # ------------------------------------------------------------
-  # 7. Уведомление: успех
+  # 7. Уведомление: успех (только если были изменения)
   # ------------------------------------------------------------
   - name: notify-success
-    image: deblan/woodpecker-email
-    settings:
-      dsn:
-        from_secret: email_dsn
-      from:
-        address:
-          from_secret: email_username
-        name: Incus Sync Bot
-      recipients:
+    image: python:3.12-slim
+    environment:
+      SMTP_HOST:
+        from_secret: smtp_host
+      SMTP_PORT:
+        from_secret: smtp_port
+      SMTP_USER:
+        from_secret: email_username
+      SMTP_PASS:
+        from_secret: smtp_pass
+      NOTIFY_EMAIL:
         from_secret: email_recipient
-      recipients_only: true
-      template: |
-        Subject: ✅ Incus Sync: PR создан (pipeline #${CI_PIPELINE_NUMBER})
-        Content-Type: text/plain; charset=UTF-8
+      NOTIFY_FROM: "Incus Sync Bot"
+    commands:
+      - |
+        if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
+          echo "⏭️  No changes detected — email is intentionally skipped"
+          exit 0
+        fi
+      - |
+        python -c "
+        import os, smtplib, ssl
+        from email.message import EmailMessage
+        from pathlib import Path
 
-        Здравствуйте!
+        def read(path, default=''):
+            p = Path(path)
+            return p.read_text(encoding='utf-8').strip() if p.exists() else default
 
-        Pipeline синхронизации Incus -> Rust успешно завершён.
+        pr_url          = read('state/.pr_url', '(нет PR)')
+        incus_sha       = read('state/.incus_sha', '(не определён)')
+        api_count       = read('state/.api_changed_count', '0')
+        client_count    = read('state/.client_changed_count', '0')
+        generated_count = read('state/.generated_count', '0')
 
-        Что было выполнено:
-          • Мониторинг изменений Go-репозитория Incus
-          • AST-парсинг Go-моделей
-          • Шаблонная генерация Rust DTO (template-first)
-          • LLM repair шаблонного результата при необходимости
-          • Публикация Pull Request в целевой Rust-репозиторий
+        pipeline_number = os.environ.get('CI_PIPELINE_NUMBER', '?')
+        pipeline_url    = os.environ.get('CI_PIPELINE_URL', '')
+        repo            = os.environ.get('CI_REPO', '')
+        commit_sha      = os.environ.get('CI_COMMIT_SHA', '')
+        branch          = os.environ.get('CI_COMMIT_BRANCH', '')
 
-        После публикации PR качество кода
-        проверяет независимый CI потребителя
-        (incus-lab-manager): cargo check, cargo fmt --check,
-        cargo test --test serde_dto.
+        smtp_host    = os.environ['SMTP_HOST']
+        smtp_port    = int(os.environ['SMTP_PORT'])
+        smtp_user    = os.environ['SMTP_USER']
+        smtp_pass    = os.environ['SMTP_PASS']
+        notify_email = os.environ['NOTIFY_EMAIL']
+        from_name    = os.environ.get('NOTIFY_FROM', 'Incus Sync Bot')
 
-        Сводка:
-          • Репозиторий генератора: ${CI_REPO}
-          • Pipeline: ${CI_PIPELINE_URL}
-          • Коммит генератора: ${CI_COMMIT_SHA}
-          • Ветка: ${CI_COMMIT_BRANCH}
+        subject = f'✅ Incus Sync: PR создан (pipeline #{pipeline_number})'
 
-        —
-        Incus Sync Bot
+        body = (
+            'Здравствуйте!\n\n'
+            'Pipeline синхронизации Incus -> Rust успешно завершён.\n\n'
+            'Что было выполнено:\n'
+            '  • Мониторинг изменений Go-репозитория Incus\n'
+            '  • AST-парсинг Go-моделей\n'
+            '  • Шаблонная генерация Rust DTO (template-first)\n'
+            '  • LLM repair шаблонного результата при необходимости\n'
+            '  • Публикация Pull Request в целевой Rust-репозиторий\n\n'
+            'После публикации PR качество кода проверяет независимый\n'
+            'CI потребителя (incus-lab-manager):\n'
+            '  cargo check, cargo fmt --check, cargo test --test serde_dto.\n\n'
+            'Сводка:\n'
+            f'  • Репозиторий генератора: {repo}\n'
+            f'  • Pipeline: {pipeline_url}\n'
+            f'  • Коммит генератора: {commit_sha}\n'
+            f'  • Ветка: {branch}\n'
+            f'  • Коммит Incus: {incus_sha}\n'
+            f'  • Изменённых API-файлов: {api_count}\n'
+            f'  • Изменений в client/: {client_count}\n'
+            f'  • Сгенерировано Rust-файлов: {generated_count}\n'
+            f'  • Pull Request: {pr_url}\n\n'
+            '—\n'
+            'Incus Sync Bot\n'
+        )
+
+        msg = EmailMessage()
+        msg['Subject'] = subject
+        msg['From']    = f'{from_name} <{smtp_user}>'
+        msg['To']      = notify_email
+        msg.set_content(body)
+
+        ctx = ssl.create_default_context()
+        if smtp_port == 465:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, context=ctx) as s:
+                s.login(smtp_user, smtp_pass)
+                s.send_message(msg)
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port) as s:
+                s.starttls(context=ctx)
+                s.login(smtp_user, smtp_pass)
+                s.send_message(msg)
+
+        print(f'✅ Success email sent to {notify_email}')
+        "
     when:
       - status: success
     depends_on:
       - update-state
 
   # ------------------------------------------------------------
-  # 8. Уведомление: ошибка
+  # 8. Уведомление: ошибка (всегда при отказе любого шага)
   # ------------------------------------------------------------
   - name: notify-failure
-    image: deblan/woodpecker-email
-    settings:
-      dsn:
-        from_secret: email_dsn
-      from:
-        address:
-          from_secret: email_username
-        name: Incus Sync Bot
-      recipients:
+    image: python:3.12-slim
+    environment:
+      SMTP_HOST:
+        from_secret: smtp_host
+      SMTP_PORT:
+        from_secret: smtp_port
+      SMTP_USER:
+        from_secret: email_username
+      SMTP_PASS:
+        from_secret: smtp_pass
+      NOTIFY_EMAIL:
         from_secret: email_recipient
-      recipients_only: true
-      template: |
-        Subject: ⚠️ Incus Sync: ошибка синхронизации (pipeline #${CI_PIPELINE_NUMBER})
-        Content-Type: text/plain; charset=UTF-8
+      NOTIFY_FROM: "Incus Sync Bot"
+    commands:
+      - |
+        python -c "
+        import os, smtplib, ssl
+        from email.message import EmailMessage
+        from pathlib import Path
 
-        Здравствуйте!
+        def read(path, default=''):
+            p = Path(path)
+            return p.read_text(encoding='utf-8').strip() if p.exists() else default
 
-        Pipeline синхронизации Incus -> Rust завершился с ошибкой.
+        pr_url    = read('state/.pr_url', '(PR не создан)')
+        incus_sha = read('state/.incus_sha', '(не определён)')
 
-        Возможные этапы отказа:
-          • Мониторинг
-          • Клонирование Incus
-          • Генерация DTO
-          • LLM repair
-          • Публикация PR
+        pipeline_number = os.environ.get('CI_PIPELINE_NUMBER', '?')
+        pipeline_url    = os.environ.get('CI_PIPELINE_URL', '')
+        repo            = os.environ.get('CI_REPO', '')
+        commit_sha      = os.environ.get('CI_COMMIT_SHA', '')
+        branch          = os.environ.get('CI_COMMIT_BRANCH', '')
 
-        Сводка:
-          • Репозиторий генератора: ${CI_REPO}
-          • Pipeline: ${CI_PIPELINE_URL}
-          • Коммит генератора: ${CI_COMMIT_SHA}
-          • Ветка: ${CI_COMMIT_BRANCH}
+        smtp_host    = os.environ['SMTP_HOST']
+        smtp_port    = int(os.environ['SMTP_PORT'])
+        smtp_user    = os.environ['SMTP_USER']
+        smtp_pass    = os.environ['SMTP_PASS']
+        notify_email = os.environ['NOTIFY_EMAIL']
+        from_name    = os.environ.get('NOTIFY_FROM', 'Incus Sync Bot')
 
-        Требуется анализ логов pipeline.
+        subject = f'⚠️ Incus Sync: ошибка синхронизации (pipeline #{pipeline_number})'
 
-        —
-        Incus Sync Bot
+        body = (
+            'Здравствуйте!\n\n'
+            'Pipeline синхронизации Incus -> Rust завершился с ошибкой.\n\n'
+            'Возможные этапы отказа:\n'
+            '  • Мониторинг изменений\n'
+            '  • Клонирование Incus\n'
+            '  • Генерация DTO\n'
+            '  • LLM repair\n'
+            '  • Публикация PR\n'
+            '  • Обновление состояния\n\n'
+            'Сводка:\n'
+            f'  • Репозиторий генератора: {repo}\n'
+            f'  • Pipeline: {pipeline_url}\n'
+            f'  • Коммит генератора: {commit_sha}\n'
+            f'  • Ветка: {branch}\n'
+            f'  • Коммит Incus: {incus_sha}\n'
+            f'  • PR (если успел создаться): {pr_url}\n\n'
+            'Требуется анализ логов pipeline.\n\n'
+            '—\n'
+            'Incus Sync Bot\n'
+        )
+
+        msg = EmailMessage()
+        msg['Subject'] = subject
+        msg['From']    = f'{from_name} <{smtp_user}>'
+        msg['To']      = notify_email
+        msg.set_content(body)
+
+        ctx = ssl.create_default_context()
+        if smtp_port == 465:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, context=ctx) as s:
+                s.login(smtp_user, smtp_pass)
+                s.send_message(msg)
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port) as s:
+                s.starttls(context=ctx)
+                s.login(smtp_user, smtp_pass)
+                s.send_message(msg)
+
+        print(f'⚠️ Failure email sent to {notify_email}')
+        "
     when:
       - status: failure
