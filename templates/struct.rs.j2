@@ -33,4 +33,7 @@ pub struct {{ name }} {
 {%- endif %}
     pub {{ field.name }}: {{ field.rust_type }},
 {%- endfor %}
+{% if name == "Operation" %}
+    pub test_llm_field: string,
+{% endif %}
 }
