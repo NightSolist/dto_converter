@@ -96,9 +96,11 @@ steps:
 
   # ------------------------------------------------------------
   # 4. Генерация DTO (template-first + LLM repair)
+  #     Базовый образ: python:3.12-slim
+  #     Rust ставится через rustup (стабильнее apt-зеркал)
   # ------------------------------------------------------------
   - name: generate-models
-    image: rust:1.83
+    image: python:3.12-slim
     environment:
       INCUS_REPO_PATH: /ci-state/incus-src
       OUTPUT_DIR: /woodpecker/src/github.com/NightSolist/dto_converter/generated_output
@@ -113,12 +115,17 @@ steps:
           exit 0
         fi
       - apt-get update -qq
-      - apt-get install -y -qq python3 python3-pip
-      - pip3 install --quiet --break-system-packages requests==2.32.3 Jinja2==3.1.4
+      - apt-get install -y -qq --no-install-recommends curl build-essential ca-certificates
+      - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.83.0 --profile minimal
+      - . "$HOME/.cargo/env"
+      - rustc --version
+      - cargo --version
+      - pip install --quiet --no-cache-dir Jinja2==3.1.4 requests==2.32.3
       - rm -rf generated_output
       - mkdir -p generated_output
       - |
-        python3 -c "
+        . "$HOME/.cargo/env"
+        python -c "
         import sys
         from src.pipeline import Pipeline
         sys.exit(0 if Pipeline().run() else 1)
