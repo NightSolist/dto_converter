@@ -391,12 +391,4 @@ steps:
         print(f'⚠️ Failure email sent to {notify_email}')
         "
     when:
-      - status: [success, failure]
-        evaluate: 'CI_PIPELINE_STATUS == "failure"'
-    depends_on:
-      - build-parser
-      - monitor-changes
-      - clone-incus-source
-      - generate-models
-      - publish-pr
-      - update-state
+      - status: failure
