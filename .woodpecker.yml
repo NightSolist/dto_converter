@@ -58,8 +58,6 @@ steps:
             print(f'Changes detected: API={api_count}, client={client_count}')
         "
       - echo "✅ Monitoring finished"
-    depends_on:
-      - build-parser
 
   # ------------------------------------------------------------
   # 3. Клонирование/обновление Incus source repo (shallow + cache)
