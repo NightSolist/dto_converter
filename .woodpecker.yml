@@ -180,6 +180,7 @@ steps:
           echo "⏭️  No changes detected, skipping state update"
           exit 0
         fi
+      - pip install --quiet PyGithub==2.5.0
       - |
         python -c "
         import json
