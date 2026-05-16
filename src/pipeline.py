@@ -379,13 +379,12 @@ class Pipeline:
         вызвана тем, что зависимый тип ещё не был сгенерирован
         и не попал в support_files.
         """
-        markers = [
-            "no `",
-            "not found in `crate::incus`",
-            "cannot find type",
-            "unresolved import `crate::incus::",
-        ]
-        return any(marker in error_text for marker in markers)
+        lowered = error_text.lower()
+        return (
+            "unresolved import `crate::incus::" in lowered
+            or "not found in `crate::incus`" in lowered
+            or "no `crate::incus::" in lowered
+        )
 
     def _notify_engineer(self, failed_entities: list[dict]) -> None:
         changes_file = Path("state/changes.json")

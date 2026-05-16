@@ -463,3 +463,11 @@ steps:
         "
     when:
       - status: failure
+    depends_on:
+      - build-parser
+      - monitor-changes
+      - clone-incus-source
+      - generate-models
+      - rustfmt-generated
+      - publish-pr
+      - update-state

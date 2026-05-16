@@ -1,3 +1,4 @@
+import os
 import re
 from typing import Optional, Tuple
 
@@ -161,12 +162,16 @@ FEW_SHOT_EXAMPLES = [
 class LLMGenerator:
     def __init__(
         self,
-        ollama_url: str = "http://127.0.0.1:11434/api/chat",
+        ollama_url: Optional[str] = None,
         model: str = "qwen2.5-coder:1.5b",
         timeout_seconds: int = 120,
         max_retries: int = 3,
     ):
-        self.ollama_url = ollama_url
+        self.ollama_url = (
+            ollama_url
+            or os.getenv("OLLAMA_URL")
+            or "http://127.0.0.1:11434/api/chat"
+        )
         self.model = model
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
