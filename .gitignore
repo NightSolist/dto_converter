@@ -26,4 +26,16 @@ src/go-ast-parser/parser
 # Runtime state
 state/.sync_state
 state/changes.json
-EOF
+EOF*_old.*
+
+# Local backup files (никогда не коммитим)
+*_old.*
+* copy.*
+* copy 2.*
+* copy 3.*
+* copy 4.*
+* copy 5.*
+* copy 6.*
+* copy 7.*
+* copy 8.*
+* copy 9.*
