@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 
 from src.config import Config
@@ -71,20 +72,35 @@ class Pipeline:
         parsed_alias_count = len(aliases)
 
         if PROTOTYPE_MODE:
+            # Транзитивно расширяем whitelist:
+            # если whitelisted-структура ссылается на другую структуру,
+            # эта другая структура тоже включается в обработку.
+            expanded_struct_whitelist = self._expand_struct_whitelist(
+                structs, PROTOTYPE_STRUCT_WHITELIST
+            )
+            expanded_alias_whitelist = self._expand_alias_whitelist(
+                structs, aliases, PROTOTYPE_ALIAS_WHITELIST,
+                expanded_struct_whitelist,
+            )
+            expanded_enum_whitelist = self._expand_enum_whitelist(
+                structs, enums, PROTOTYPE_ENUM_WHITELIST,
+                expanded_struct_whitelist,
+            )
+
             structs = {
                 k: v for k, v in structs.items()
-                if k in PROTOTYPE_STRUCT_WHITELIST
+                if k in expanded_struct_whitelist
             }
             enums = {
                 k: v for k, v in enums.items()
-                if k in PROTOTYPE_ENUM_WHITELIST
+                if k in expanded_enum_whitelist
             }
             aliases = {
                 k: v for k, v in aliases.items()
-                if k in PROTOTYPE_ALIAS_WHITELIST
+                if k in expanded_alias_whitelist
             }
             print(
-                f"🧪 Prototype filter: "
+                f"🧪 Prototype filter (expanded): "
                 f"{len(structs)} structs, "
                 f"{len(enums)} enums, "
                 f"{len(aliases)} aliases"
@@ -372,6 +388,128 @@ class Pipeline:
                 "error": val_result.error_message or "Unknown",
             }])
             return False
+
+    def _expand_struct_whitelist(
+        self,
+        structs: dict,
+        base_whitelist: set[str],
+    ) -> set[str]:
+        """
+        Транзитивно расширяет whitelist структур.
+
+        Если структура из whitelist ссылается на другую структуру,
+        существующую в Go-пакете, эта структура тоже включается
+        в whitelist. Процесс повторяется до тех пор, пока не
+        будут найдены все транзитивные зависимости.
+        """
+        expanded = set(base_whitelist)
+        all_struct_names = set(structs.keys())
+
+        changed = True
+        while changed:
+            changed = False
+            for name in list(expanded):
+                if name not in structs:
+                    continue
+                struct_obj = structs[name]
+
+                referenced_types = self._extract_referenced_types(
+                    struct_obj
+                )
+
+                for ref in referenced_types:
+                    if (
+                        ref in all_struct_names
+                        and ref not in expanded
+                    ):
+                        expanded.add(ref)
+                        changed = True
+                        print(
+                            f"🔗 Auto-included dependent struct: "
+                            f"{ref} (referenced by {name})"
+                        )
+
+        return expanded
+
+    def _expand_alias_whitelist(
+        self,
+        structs: dict,
+        aliases: dict,
+        base_alias_whitelist: set[str],
+        expanded_struct_whitelist: set[str],
+    ) -> set[str]:
+        """
+        Расширяет whitelist алиасов: если структура из расширенного
+        whitelist ссылается на алиас, этот алиас включается.
+        """
+        expanded = set(base_alias_whitelist)
+        all_alias_names = set(aliases.keys())
+
+        for name in expanded_struct_whitelist:
+            if name not in structs:
+                continue
+            struct_obj = structs[name]
+            referenced_types = self._extract_referenced_types(struct_obj)
+
+            for ref in referenced_types:
+                if ref in all_alias_names and ref not in expanded:
+                    expanded.add(ref)
+                    print(
+                        f"🔗 Auto-included dependent alias: "
+                        f"{ref} (referenced by {name})"
+                    )
+
+        return expanded
+
+    def _expand_enum_whitelist(
+        self,
+        structs: dict,
+        enums: dict,
+        base_enum_whitelist: set[str],
+        expanded_struct_whitelist: set[str],
+    ) -> set[str]:
+        """
+        Расширяет whitelist перечислений: если структура из
+        расширенного whitelist ссылается на enum, он включается.
+        """
+        expanded = set(base_enum_whitelist)
+        all_enum_names = set(enums.keys())
+
+        for name in expanded_struct_whitelist:
+            if name not in structs:
+                continue
+            struct_obj = structs[name]
+            referenced_types = self._extract_referenced_types(struct_obj)
+
+            for ref in referenced_types:
+                if ref in all_enum_names and ref not in expanded:
+                    expanded.add(ref)
+                    print(
+                        f"🔗 Auto-included dependent enum: "
+                        f"{ref} (referenced by {name})"
+                    )
+
+        return expanded
+
+    def _extract_referenced_types(self, struct_obj) -> set[str]:
+        """
+        Извлекает имена всех пользовательских типов,
+        на которые ссылается структура (через поля и embedding).
+        """
+        referenced: set[str] = set()
+
+        for field in struct_obj.fields:
+            tokens = re.findall(
+                r'\b[A-Z][A-Za-z0-9_]*\b', field.go_type
+            )
+            referenced.update(tokens)
+
+        for emb in struct_obj.embedded:
+            clean = emb.lstrip("*").split(".")[-1]
+            if clean:
+                referenced.add(clean)
+
+        return referenced
 
     def _is_missing_dependency_error(self, error_text: str) -> bool:
         """
