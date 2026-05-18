@@ -14,7 +14,7 @@ steps:
     commands:
       - cd src/go-ast-parser
       - go build -o parser main.go
-      - echo "✅ Go AST parser built"
+      - echo "Go AST parser built"
 
   # ------------------------------------------------------------
   # 2. Мониторинг изменений Incus (без клонирования)
@@ -33,7 +33,7 @@ steps:
       - mkdir -p state
       - mkdir -p /ci-state/incus-sync
       - |
-        python -c "
+        python -u -c "
         import json, os
         from pathlib import Path
         from src.monitor import run_monitor
@@ -70,7 +70,7 @@ steps:
             Path('state/.client_changed_files').write_text('\n'.join(client_files), encoding='utf-8')
             print(f'Changes detected: API={len(api_files)}, client={len(client_files)}')
         "
-      - echo "✅ Monitoring finished"
+      - echo "Monitoring finished"
 
   # ------------------------------------------------------------
   # 3. Клонирование/обновление Incus source repo
@@ -87,7 +87,7 @@ steps:
     commands:
       - |
         if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
-          echo "⏭️  No changes detected, skipping Incus clone"
+          echo "No changes detected, skipping Incus clone"
           exit 0
         fi
       - git config --global --add safe.directory '*'
@@ -95,15 +95,15 @@ steps:
       - cd /ci-state/incus-src
       - |
         if [ -d ".git" ]; then
-          echo "📦 Incus repo cache found, updating..."
+          echo "Incus repo cache found, updating..."
           git fetch --depth=1 origin HEAD
           git reset --hard FETCH_HEAD
           git clean -fd
         else
-          echo "📦 First clone of Incus repo (shallow)..."
+          echo "First clone of Incus repo (shallow)..."
           git clone --depth=1 "https://x-access-token:$${GITHUB_TOKEN}@github.com/$${INCUS_SOURCE_REPO}.git" .
         fi
-      - echo "✅ Incus source repo ready"
+      - echo "Incus source repo ready"
     depends_on:
       - monitor-changes
 
@@ -118,12 +118,13 @@ steps:
       OLLAMA_URL:
         from_secret: ollama_url
       OLLAMA_TIMEOUT: "300"
+      PYTHONUNBUFFERED: "1"
     volumes:
       - /home/dev/woodpecker-state:/ci-state
     commands:
       - |
         if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
-          echo "⏭️  No changes detected, skipping generation"
+          echo "No changes detected, skipping generation"
           exit 0
         fi
       - apt-get update -qq
@@ -134,20 +135,20 @@ steps:
       - cargo --version
       - pip install --quiet --no-cache-dir Jinja2==3.1.4 requests==2.32.3
       - |
-        echo "🔥 Warming up Ollama model..."
+        echo "Warming up Ollama model..."
         curl -s "$${OLLAMA_URL}" \
-          -d '{"model":"qwen2.5-coder:1.5b","messages":[{"role":"user","content":"hi"}],"stream":false}' \
-          --max-time 300 || echo "⚠️ Warmup failed, continuing anyway"
+          -d '{"model":"qwen2.5-coder:1.5b","messages":[{"role":"user","content":"hi"}],"stream":false,"keep_alive":"10m"}' \
+          --max-time 300 || echo "Warmup failed, continuing anyway"
       - rm -rf generated_output
       - mkdir -p generated_output
       - |
         . "$HOME/.cargo/env"
-        python -c "
+        python -u -c "
         import sys
         from src.pipeline import Pipeline
         sys.exit(0 if Pipeline().run() else 1)
         "
-      - echo "✅ DTO generation completed"
+      - echo "DTO generation completed"
       - |
         count=$$(find generated_output -maxdepth 1 -name "*.rs" | wc -l)
         echo "Generated files: $${count}"
@@ -163,16 +164,16 @@ steps:
     commands:
       - |
         if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
-          echo "⏭️  No changes detected, skipping rustfmt"
+          echo "No changes detected, skipping rustfmt"
           exit 0
         fi
       - rustup component add rustfmt
       - |
         for f in generated_output/*.rs; do
-          echo "🧹 Formatting $f"
+          echo "Formatting $f"
           rustfmt --edition 2021 "$f"
         done
-      - echo "✅ Generated Rust files formatted"
+      - echo "Generated Rust files formatted"
     depends_on:
       - generate-models
 
@@ -189,12 +190,12 @@ steps:
     commands:
       - |
         if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
-          echo "⏭️  No changes detected, skipping PR publication"
+          echo "No changes detected, skipping PR publication"
           exit 0
         fi
       - pip install --quiet PyGithub==2.5.0
       - |
-        python -c "
+        python -u -c "
         import os
         from pathlib import Path
         from src.github_publisher import GitHubPublisher
@@ -225,12 +226,68 @@ steps:
             Path('state/.pr_url').write_text(result.pr_url or '', encoding='utf-8')
             print(f'PR created: {result.pr_url}')
         "
-      - echo "✅ Publish stage finished"
+      - echo "Publish stage finished"
     depends_on:
       - rustfmt-generated
 
   # ------------------------------------------------------------
-  # 7. Обновление persistent state
+  # 7. Триггер lab CI после публикации PR
+  # ------------------------------------------------------------
+  - name: trigger-lab-ci
+    image: python:3.12-slim
+    environment:
+      WOODPECKER_URL:
+        from_secret: woodpecker_url
+      WOODPECKER_TOKEN:
+        from_secret: woodpecker_token
+      WOODPECKER_REPO:
+        from_secret: woodpecker_repo
+      GITHUB_TOKEN:
+        from_secret: github_token
+      RUST_TARGET_REPO:
+        from_secret: rust_target_repo
+    commands:
+      - |
+        if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
+          echo "No changes detected, skipping lab CI trigger"
+          exit 0
+        fi
+      - |
+        if [ "$(cat state/.no_rust_diff 2>/dev/null)" = "true" ]; then
+          echo "No Rust diff, no PR was created — skipping lab CI"
+          exit 0
+        fi
+      - pip install --quiet requests==2.32.3 PyGithub==2.5.0
+      - |
+        python -u -c "
+        import os
+        from pathlib import Path
+        from github import Auth, Github
+        from src.woodpecker_trigger import WoodpeckerTrigger
+
+        pr_url = Path('state/.pr_url').read_text(encoding='utf-8').strip()
+        if not pr_url:
+            print('No PR URL stored, nothing to trigger')
+            raise SystemExit(0)
+
+        pr_number = pr_url.rstrip('/').split('/')[-1]
+
+        gh = Github(auth=Auth.Token(os.environ['GITHUB_TOKEN']))
+        repo = gh.get_repo(os.environ['RUST_TARGET_REPO'])
+        pr = repo.get_pull(int(pr_number))
+        branch = pr.head.ref
+        print(f'PR #{pr_number} branch: {branch}')
+
+        trigger = WoodpeckerTrigger()
+        url = trigger.trigger_pipeline(branch=branch)
+        print(f'Triggered: {url}')
+        "
+      - echo "Lab CI pipeline triggered successfully"
+    depends_on:
+      - publish-pr
+
+  # ------------------------------------------------------------
+  # 8. Обновление persistent state
   # ------------------------------------------------------------
   - name: update-state
     image: python:3.12-slim
@@ -239,11 +296,11 @@ steps:
     commands:
       - |
         if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
-          echo "⏭️  No changes detected, skipping state update"
+          echo "No changes detected, skipping state update"
           exit 0
         fi
       - |
-        python -c "
+        python -u -c "
         import json
         from pathlib import Path
         from src.state import save_state
@@ -252,12 +309,12 @@ steps:
             save_state(sha, Path('/ci-state/incus-sync/.sync_state'))
             print(f'State updated: {sha}')
         "
-      - echo "✅ Sync state updated"
+      - echo "Sync state updated"
     depends_on:
-      - publish-pr
+      - trigger-lab-ci
 
   # ------------------------------------------------------------
-  # 8. Уведомление: успех (только если были изменения)
+  # 9. Уведомление: успех (только если были изменения)
   # ------------------------------------------------------------
   - name: notify-success
     image: python:3.12-slim
@@ -276,11 +333,11 @@ steps:
     commands:
       - |
         if [ "$(cat state/.no_changes 2>/dev/null)" = "true" ]; then
-          echo "⏭️  No changes detected — email is intentionally skipped"
+          echo "No changes detected, email is intentionally skipped"
           exit 0
         fi
       - |
-        python -c "
+        python -u -c "
         import os, smtplib, ssl
         from email.message import EmailMessage
         from pathlib import Path
@@ -380,7 +437,7 @@ steps:
       - update-state
 
   # ------------------------------------------------------------
-  # 9. Уведомление: ошибка (всегда при отказе любого шага)
+  # 10. Уведомление: ошибка (при отказе любого шага)
   # ------------------------------------------------------------
   - name: notify-failure
     image: python:3.12-slim
@@ -398,7 +455,7 @@ steps:
       NOTIFY_FROM: "Incus Sync Bot"
     commands:
       - |
-        python -c "
+        python -u -c "
         import os, smtplib, ssl
         from email.message import EmailMessage
         from pathlib import Path
@@ -435,6 +492,7 @@ steps:
             '  - Форматирование (rustfmt)\n'
             '  - LLM repair\n'
             '  - Публикация PR\n'
+            '  - Триггер lab CI\n'
             '  - Обновление состояния\n\n'
             'Сводка:\n'
             f'  - Репозиторий генератора: {repo}\n'
@@ -476,4 +534,5 @@ steps:
       - generate-models
       - rustfmt-generated
       - publish-pr
+      - trigger-lab-ci
       - update-state
