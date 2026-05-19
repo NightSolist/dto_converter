@@ -15,6 +15,7 @@ from src.validation.validator import RustValidator
 PROTOTYPE_MODE = True
 
 PROTOTYPE_STRUCT_WHITELIST = {
+    # === Исходный набор (14 структур) ===
     "Network",
     "NetworkPut",
     "NetworksPost",
@@ -29,6 +30,136 @@ PROTOTYPE_STRUCT_WHITELIST = {
     "InstanceSource",
     "InstanceStatePut",
     "Operation",
+
+    # === Расширение: образы ===
+    "Image",
+    "ImagePut",
+    "ImagesPost",
+    "ImageAlias",
+    "ImageAliasesEntry",
+    "ImageAliasesPost",
+    "ImageMetadata",
+    "ImageSource",
+
+    # === Расширение: проекты ===
+    "Project",
+    "ProjectPut",
+    "ProjectsPost",
+    "ProjectState",
+
+    # === Расширение: сертификаты ===
+    "Certificate",
+    "CertificatePut",
+    "CertificatesPost",
+    "CertificateAddToken",
+
+    # === Расширение: кластер ===
+    "Cluster",
+    "ClusterPut",
+    "ClusterMember",
+    "ClusterMemberPut",
+    "ClusterMembersPost",
+    "ClusterMemberState",
+    "ClusterMemberSysInfo",
+    "ClusterGroup",
+    "ClusterGroupPut",
+    "ClusterGroupsPost",
+
+    # === Расширение: предупреждения ===
+    "Warning",
+    "WarningPut",
+
+    # === Расширение: сетевые расширения ===
+    "NetworkForward",
+    "NetworkForwardPut",
+    "NetworkForwardsPost",
+    "NetworkForwardPort",
+    "NetworkLoadBalancer",
+    "NetworkLoadBalancerPut",
+    "NetworkLoadBalancersPost",
+    "NetworkLoadBalancerPort",
+    "NetworkLoadBalancerBackend",
+    "NetworkLoadBalancerState",
+    "NetworkACL",
+    "NetworkACLPut",
+    "NetworkACLsPost",
+    "NetworkACLRule",
+    "NetworkZone",
+    "NetworkZonePut",
+    "NetworkZonesPost",
+    "NetworkPeer",
+    "NetworkPeerPut",
+    "NetworkPeersPost",
+    "NetworkState",
+    "NetworkAddress",
+    "NetworkLease",
+
+    # === Расширение: тома хранения ===
+    "StorageVolume",
+    "StorageVolumePut",
+    "StorageVolumesPost",
+    "StorageVolumeSource",
+    "StorageVolumeState",
+    "StorageVolumeSnapshot",
+    "StorageVolumeSnapshotPut",
+    "StorageVolumeBackup",
+    "StorageVolumeBackupsPost",
+
+    # === Расширение: бакеты хранения ===
+    "StorageBucket",
+    "StorageBucketPut",
+    "StorageBucketsPost",
+    "StorageBucketKey",
+    "StorageBucketKeyPut",
+    "StorageBucketKeysPost",
+
+    # === Расширение: резервные копии инстансов ===
+    "InstanceBackup",
+    "InstanceBackupsPost",
+
+    # === Расширение: снимки инстансов ===
+    "InstanceSnapshot",
+    "InstanceSnapshotPut",
+    "InstanceSnapshotsPost",
+
+    # === Расширение: полное состояние инстанса ===
+    "Instance",
+    "InstanceFull",
+    "InstanceState",
+    "InstanceStateCPU",
+    "InstanceStateMemory",
+    "InstanceStateNetwork",
+    "InstanceStateNetworkAddress",
+    "InstanceStateNetworkCounters",
+    "InstanceStateDisk",
+    "InstanceStateOSInfo",
+
+    # === Расширение: сервер ===
+    "Server",
+    "ServerPut",
+    "ServerEnvironment",
+    "ServerUntrusted",
+
+    # === Расширение: ресурсы (сложная иерархия) ===
+    "Resources",
+    "ResourcesCPU",
+    "ResourcesCPUCore",
+    "ResourcesCPUSocket",
+    "ResourcesCPUThread",
+    "ResourcesMemory",
+    "ResourcesMemoryNode",
+    "ResourcesStorage",
+    "ResourcesStorageDisk",
+    "ResourcesStoragePool",
+    "ResourcesNetwork",
+    "ResourcesNetworkCard",
+    "ResourcesGPU",
+    "ResourcesGPUCard",
+
+    # === Расширение: события ===
+    "Event",
+    "EventLifecycle",
+    "EventLogging",
 }
 
 PROTOTYPE_ENUM_WHITELIST = {
