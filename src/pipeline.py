@@ -394,47 +394,87 @@ class Pipeline:
             break
 
         # ============================================================
-        # 4. LLM REPAIR для оставшихся struct
+        # 4. LLM REPAIR для оставшихся struct (только для дефектов
+        #    шаблона; структуры с циклическими зависимостями сразу
+        #    помечаются как требующие ручной обработки)
         # ============================================================
         if postponed_structs:
-            print(
-                f"\n🤖 Running LLM repair for remaining "
-                f"{len(postponed_structs)} struct(s)..."
-            )
+            # Разделяем отложенные структуры на две группы:
+            # те, что упали из-за отсутствия зависимости (циклы),
+            # и те, что упали из-за дефекта шаблона
+            cyclic_failed: dict[str, tuple] = {}
+            repair_candidates: dict[str, tuple] = {}
 
-        for name, struct_obj in postponed_structs.items():
-            mod_name = camel_to_snake(name)
-            filename = f"{mod_name}.rs"
-            print(f"\n📗 {name}")
+            for name, struct_obj in postponed_structs.items():
+                template_code = self.generator.generate_struct(struct_obj)
+                mod_name = camel_to_snake(name)
+                filename = f"{mod_name}.rs"
+                template_res = self.validator.validate_single(
+                    filename, template_code, test_env_files
+                )
 
-            template_code = self.generator.generate_struct(struct_obj)
-            template_res = self.validator.validate_single(
-                filename, template_code, test_env_files
-            )
+                error_text = template_res.error_message or ""
+                if self._is_missing_dependency_error(error_text):
+                    cyclic_failed[name] = (struct_obj, error_text)
+                else:
+                    repair_candidates[name] = (struct_obj, error_text)
 
-            raw_go = self._build_raw_go_struct(struct_obj)
-            success, repaired, info = self.llm_generator.repair(
-                entity_name=name,
-                raw_go_code=raw_go,
-                template_rust_code=template_code,
-                initial_error=template_res.error_message or "Unknown error",
-                validator=self.validator,
-                test_env_files=test_env_files,
-                filename=filename,
-            )
+            # Структуры с циклическими зависимостями — сразу в failed,
+            # без LLM repair (он бесполезен в этой ситуации)
+            if cyclic_failed:
+                print(
+                    f"\n⚠️  {len(cyclic_failed)} структур "
+                    f"имеют циклические зависимости и не могут "
+                    f"быть обработаны автоматически:"
+                )
+                for name, (struct_obj, error_text) in cyclic_failed.items():
+                    print(f"   ✗ {name} (cyclic dependency)")
+                    short_err = error_text[:200] if error_text else ""
+                    failed_entities.append({
+                        "name": name,
+                        "kind": "struct",
+                        "error": (
+                            f"Циклическая зависимость: {short_err}"
+                        ),
+                    })
 
-            if success and repaired:
-                generated_files[filename] = repaired
-                test_env_files[filename] = repaired
-                mod_entities.append((name, mod_name))
-                print(f"   ✅ llm repair passed ({info})")
-            else:
-                failed_entities.append({
-                    "name": name,
-                    "kind": "struct",
-                    "error": info,
-                })
-                print(f"   ❌ failed: {info}")
+            # Только реальные кандидаты на repair передаются в LLM
+            if repair_candidates:
+                print(
+                    f"\n🤖 Running LLM repair for "
+                    f"{len(repair_candidates)} struct(s)..."
+                )
+
+            for name, (struct_obj, error_text) in repair_candidates.items():
+                mod_name = camel_to_snake(name)
+                filename = f"{mod_name}.rs"
+                print(f"\n📗 {name}")
+
+                template_code = self.generator.generate_struct(struct_obj)
+
+                raw_go = self._build_raw_go_struct(struct_obj)
+                success, repaired, info = self.llm_generator.repair(
+                    entity_name=name,
+                    raw_go_code=raw_go,
+                    template_rust_code=template_code,
+                    initial_error=error_text or "Unknown error",
+                    validator=self.validator,
+                    test_env_files=test_env_files,
+                    filename=filename,
+                )
+
+                if success and repaired:
+                    generated_files[filename] = repaired
+                    test_env_files[filename] = repaired
+                    mod_entities.append((name, mod_name))
+                    print(f"   ✅ llm repair passed ({info})")
+                else:
+                    failed_entities.append({
+                        "name": name,
+                        "kind": "struct",
+                        "error": info,
+                    })
+                    print(f"   ❌ failed: {info}")
 
         # ============================================================
         # 5. Сводный отчёт о провалах (не прерываем pipeline)
