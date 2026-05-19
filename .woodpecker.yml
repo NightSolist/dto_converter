@@ -17,7 +17,7 @@ steps:
       - echo "Go AST parser built"
 
   # ------------------------------------------------------------
-  # 2. Мониторинг изменений Incus (без клонирования)
+  # 2. Мониторинг изменений Incus
   # ------------------------------------------------------------
   - name: monitor-changes
     image: python:3.12-slim
@@ -108,7 +108,7 @@ steps:
       - monitor-changes
 
   # ------------------------------------------------------------
-  # 4. Генерация DTO (template-first + LLM repair)
+  # 4. Генерация DTO
   # ------------------------------------------------------------
   - name: generate-models
     image: python:3.12-slim
@@ -178,7 +178,7 @@ steps:
       - generate-models
 
   # ------------------------------------------------------------
-  # 6. Публикация Pull Request в Rust-репозиторий
+  # 6. Публикация Pull Request
   # ------------------------------------------------------------
   - name: publish-pr
     image: python:3.12-slim
@@ -231,7 +231,7 @@ steps:
       - rustfmt-generated
 
   # ------------------------------------------------------------
-  # 7. Триггер lab CI после публикации PR
+  # 7. Триггер lab CI
   # ------------------------------------------------------------
   - name: trigger-lab-ci
     image: python:3.12-slim
@@ -311,10 +311,10 @@ steps:
         "
       - echo "Sync state updated"
     depends_on:
-      - trigger-lab-ci
+      - publish-pr
 
   # ------------------------------------------------------------
-  # 9. Уведомление: успех (только если были изменения)
+  # 9. Уведомление: успех (с учётом частичных провалов)
   # ------------------------------------------------------------
   - name: notify-success
     image: python:3.12-slim
@@ -338,7 +338,7 @@ steps:
         fi
       - |
         python -u -c "
-        import os, smtplib, ssl
+        import os, json, smtplib, ssl
         from email.message import EmailMessage
         from pathlib import Path
 
@@ -356,6 +356,15 @@ steps:
                 if line.strip()
             ]
 
+        def read_json(path):
+            p = Path(path)
+            if not p.exists():
+                return []
+            try:
+                return json.loads(p.read_text(encoding='utf-8'))
+            except Exception:
+                return []
+
         def bullet_list(items, empty='  (нет)'):
             if not items:
                 return empty
@@ -369,6 +378,7 @@ steps:
         client_files = read_lines('state/.client_changed_files')
         generated_files = read_lines('state/.generated_files')
         changed_rust_files = read_lines('state/.changed_rust_files')
+        failed_entities = read_json('state/.failed_entities.json')
 
         pipeline_number = os.environ.get('CI_PIPELINE_NUMBER', '?')
         pipeline_url = os.environ.get('CI_PIPELINE_URL', '')
@@ -381,29 +391,53 @@ steps:
         notify_email = os.environ['NOTIFY_EMAIL']
         from_name = os.environ.get('NOTIFY_FROM', 'Incus Sync Bot')
 
-        if no_rust_diff:
+        if failed_entities:
+            subject = (
+                f'Incus Sync: синхронизация выполнена, требуется ручная '
+                f'обработка {len(failed_entities)} сущностей '
+                f'(pipeline #{pipeline_number})'
+            )
+        elif no_rust_diff:
             subject = (
                 f'Incus Sync: синхронизация выполнена, '
                 f'изменений в Rust DTO нет (pipeline #{pipeline_number})'
             )
-            pr_line = '  - Pull Request: не создавался (diff отсутствует)'
         else:
             subject = (
                 f'Incus Sync: синхронизация выполнена, '
                 f'PR создан (pipeline #{pipeline_number})'
             )
+
+        if no_rust_diff:
+            pr_line = '  - Pull Request: не создавался (diff отсутствует)'
+        else:
             pr_line = f'  - Pull Request: {pr_url}'
+
+        if failed_entities:
+            failed_block = '\nТребуют ручной обработки:\n'
+            for item in failed_entities:
+                name = item.get('name', '?')
+                kind = item.get('kind', '?')
+                error = item.get('error', '')
+                if len(error) > 200:
+                    error = error[:200] + '...'
+                failed_block += f'  - {name} ({kind})\n'
+                failed_block += f'    Причина: {error}\n'
+            failed_block += '\nДля этих сущностей требуется ручная синхронизация.\n'
+        else:
+            failed_block = ''
 
         body = (
             'Здравствуйте!\n\n'
-            'Автоматическая синхронизация моделей Incus -> Rust выполнена успешно.\n\n'
+            'Автоматическая синхронизация моделей Incus -> Rust выполнена.\n\n'
             'Изменившиеся Go-файлы:\n'
             f'{bullet_list(api_files + client_files)}\n\n'
             'Сгенерированные Rust-файлы:\n'
             f'{bullet_list(generated_files)}\n\n'
             'Rust-файлы, реально отличающиеся от main:\n'
-            f'{bullet_list(changed_rust_files)}\n\n'
-            'Ссылки и сводка:\n'
+            f'{bullet_list(changed_rust_files)}\n'
+            f'{failed_block}'
+            '\nСсылки и сводка:\n'
             f'{pr_line}\n'
             f'  - Pipeline: {pipeline_url}\n'
             f'  - Репозиторий генератора: {repo}\n'
@@ -437,7 +471,7 @@ steps:
       - update-state
 
   # ------------------------------------------------------------
-  # 10. Уведомление: ошибка (при отказе любого шага)
+  # 10. Уведомление: ошибка pipeline (катастрофическое падение)
   # ------------------------------------------------------------
   - name: notify-failure
     image: python:3.12-slim
@@ -480,7 +514,7 @@ steps:
         notify_email = os.environ['NOTIFY_EMAIL']
         from_name = os.environ.get('NOTIFY_FROM', 'Incus Sync Bot')
 
-        subject = f'Incus Sync: ошибка синхронизации (pipeline #{pipeline_number})'
+        subject = f'Incus Sync: критическая ошибка pipeline (pipeline #{pipeline_number})'
 
         body = (
             'Здравствуйте!\n\n'
@@ -488,9 +522,8 @@ steps:
             'Возможные этапы отказа:\n'
             '  - Мониторинг изменений\n'
             '  - Клонирование Incus\n'
-            '  - Генерация DTO\n'
+            '  - Генерация DTO (финальная валидация)\n'
             '  - Форматирование (rustfmt)\n'
-            '  - LLM repair\n'
             '  - Публикация PR\n'
             '  - Триггер lab CI\n'
             '  - Обновление состояния\n\n'

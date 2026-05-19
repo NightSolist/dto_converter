@@ -203,9 +203,6 @@ class Pipeline:
         parsed_alias_count = len(aliases)
 
         if PROTOTYPE_MODE:
-            # Транзитивно расширяем whitelist:
-            # если whitelisted-структура ссылается на другую структуру,
-            # эта другая структура тоже включается в обработку.
             expanded_struct_whitelist = self._expand_struct_whitelist(
                 structs, PROTOTYPE_STRUCT_WHITELIST
             )
@@ -244,8 +241,6 @@ class Pipeline:
         mod_entities: list[tuple[str, str]] = []
         failed_entities: list[dict] = []
 
-        # Уже успешно сгенерированные файлы.
-        # Они передаются в validate_single как support_files
         test_env_files: dict[str, str] = {}
 
         # ============================================================
@@ -396,8 +391,6 @@ class Pipeline:
                 wave += 1
                 continue
 
-            # Если в этой волне не было прогресса —
-            # дальше шаблон уже не поможет, переходим к LLM repair
             break
 
         # ============================================================
@@ -444,20 +437,26 @@ class Pipeline:
                 print(f"   ❌ failed: {info}")
 
         # ============================================================
-        # 5. Если есть провалы — уведомление и остановка
+        # 5. Сводный отчёт о провалах (не прерываем pipeline)
         # ============================================================
         if failed_entities:
             print(
-                "\n❌ Есть сущности, которые не удалось "
-                "синхронизировать:"
+                f"\n⚠️  {len(failed_entities)} сущностей "
+                f"не удалось синхронизировать автоматически. "
+                f"Они будут переданы инженеру для ручной обработки."
             )
             for item in failed_entities:
+                err = item.get('error', '')
+                if len(err) > 150:
+                    err = err[:150] + '...'
                 print(
                     f"   ✗ {item['name']} "
-                    f"({item['kind']}): {item['error']}"
+                    f"({item['kind']}): {err}"
                 )
-            self._notify_engineer(failed_entities)
-            return False
+            print(
+                f"\n✅ {len(mod_entities)} сущностей "
+                f"обработаны успешно и будут сохранены."
+            )
 
         # ============================================================
         # 6. mod.rs
@@ -491,48 +490,73 @@ class Pipeline:
         print("🛠️  Final validation...")
         val_result = self.validator.validate_all(generated_files)
 
-        if val_result.passed:
-            print(
-                f"✅ Validation passed! "
-                f"Saving {len(generated_files)} files..."
-            )
-            self.config.output_dir.mkdir(
-                parents=True, exist_ok=True
-            )
-
-            for old_file in self.config.output_dir.glob("*.rs"):
-                old_file.unlink()
-
-            for name, content in generated_files.items():
-                (self.config.output_dir / name).write_text(
-                    content, encoding="utf-8"
-                )
-
-            print("🚀 All done successfully!")
-            return True
-        else:
+        if not val_result.passed:
             print("❌ Final validation failed!")
             print(f"   Причина: {val_result.error_message}")
-            self._notify_engineer([{
+            failed_entities.append({
                 "name": "final_validation",
                 "kind": "pipeline",
                 "error": val_result.error_message or "Unknown",
-            }])
+            })
+            self._save_failed_entities(failed_entities)
+            self._notify_engineer(failed_entities)
             return False
+
+        print(
+            f"✅ Validation passed! "
+            f"Saving {len(generated_files)} files..."
+        )
+        self.config.output_dir.mkdir(parents=True, exist_ok=True)
+
+        for old_file in self.config.output_dir.glob("*.rs"):
+            old_file.unlink()
+
+        for name, content in generated_files.items():
+            (self.config.output_dir / name).write_text(
+                content, encoding="utf-8"
+            )
+
+        # Сохраняем список проваленных сущностей для шага уведомления
+        self._save_failed_entities(failed_entities)
+
+        if failed_entities:
+            print(
+                f"\n⚠️  Pipeline завершён частично:\n"
+                f"   ✅ Успешно сгенерировано: {len(mod_entities)}\n"
+                f"   ❌ Требуют ручной обработки: {len(failed_entities)}"
+            )
+        else:
+            print("🚀 All done successfully!")
+
+        return True
+
+    def _save_failed_entities(self, failed_entities: list[dict]) -> None:
+        """
+        Сохраняет список проваленных сущностей в файл state,
+        чтобы шаг notify-success в Woodpecker мог включить
+        информацию о них в email-уведомление.
+        """
+        state_dir = Path("state")
+        state_dir.mkdir(exist_ok=True)
+        failed_file = state_dir / ".failed_entities.json"
+
+        if failed_entities:
+            failed_file.write_text(
+                json.dumps(
+                    failed_entities, ensure_ascii=False, indent=2
+                ),
+                encoding="utf-8",
+            )
+            print(f"   Список провалов сохранён: {failed_file}")
+        else:
+            if failed_file.exists():
+                failed_file.unlink()
 
     def _expand_struct_whitelist(
         self,
         structs: dict,
         base_whitelist: set[str],
     ) -> set[str]:
-        """
-        Транзитивно расширяет whitelist структур.
-
-        Если структура из whitelist ссылается на другую структуру,
-        существующую в Go-пакете, эта структура тоже включается
-        в whitelist. Процесс повторяется до тех пор, пока не
-        будут найдены все транзитивные зависимости.
-        """
         expanded = set(base_whitelist)
         all_struct_names = set(structs.keys())
 
@@ -569,10 +593,6 @@ class Pipeline:
         base_alias_whitelist: set[str],
         expanded_struct_whitelist: set[str],
     ) -> set[str]:
-        """
-        Расширяет whitelist алиасов: если структура из расширенного
-        whitelist ссылается на алиас, этот алиас включается.
-        """
         expanded = set(base_alias_whitelist)
         all_alias_names = set(aliases.keys())
 
@@ -599,10 +619,6 @@ class Pipeline:
         base_enum_whitelist: set[str],
         expanded_struct_whitelist: set[str],
     ) -> set[str]:
-        """
-        Расширяет whitelist перечислений: если структура из
-        расширенного whitelist ссылается на enum, он включается.
-        """
         expanded = set(base_enum_whitelist)
         all_enum_names = set(enums.keys())
 
@@ -623,10 +639,6 @@ class Pipeline:
         return expanded
 
     def _extract_referenced_types(self, struct_obj) -> set[str]:
-        """
-        Извлекает имена всех пользовательских типов,
-        на которые ссылается структура (через поля и embedding).
-        """
         referenced: set[str] = set()
 
         for field in struct_obj.fields:
@@ -643,11 +655,6 @@ class Pipeline:
         return referenced
 
     def _is_missing_dependency_error(self, error_text: str) -> bool:
-        """
-        Возвращает True, если ошибка шаблонной генерации
-        вызвана тем, что зависимый тип ещё не был сгенерирован
-        и не попал в support_files.
-        """
         lowered = error_text.lower()
         return (
             "unresolved import `crate::incus::" in lowered
